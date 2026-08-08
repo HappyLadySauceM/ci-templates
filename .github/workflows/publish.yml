@@ -1,0 +1,48 @@
+name: publish-ci-templates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - VERSION
+      - pyproject.toml
+      - src/**
+      - tests/**
+      - .github/workflows/publish.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: harbor.happyladysauce.local/knowledge-core/ci-templates
+
+jobs:
+  test-and-publish:
+    runs-on:
+      group: Knowledge-Core CI
+      labels: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install package test dependencies
+        run: python3 -m pip install --user --no-warn-script-location .
+      - name: Test Python package
+        run: PYTHONPATH=src python3 -m unittest discover -s tests -v
+      - name: Prepare Harbor credentials
+        run: |
+          set -euo pipefail
+          umask 077
+          install -d "$RUNNER_TEMP/ci-templates-harbor"
+          printf '%s' "$HARBOR_DOCKER_CONFIG_JSON" > "$RUNNER_TEMP/ci-templates-harbor/config.json"
+          printf '%s' "$HARBOR_CA_PEM" > "$RUNNER_TEMP/ci-templates-harbor/ca.crt"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/ci-templates-harbor" >> "$GITHUB_ENV"
+          echo "SSL_CERT_FILE=$RUNNER_TEMP/ci-templates-harbor/ca.crt" >> "$GITHUB_ENV"
+        env:
+          HARBOR_DOCKER_CONFIG_JSON: ${{ secrets.HARBOR_DOCKER_CONFIG_JSON }}
+          HARBOR_CA_PEM: ${{ secrets.HARBOR_CA_PEM }}
+      - name: Build and push control image
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          docker buildx build --push --tag "${IMAGE}:${GITHUB_SHA}" --tag "${IMAGE}:v${version}" --tag "${IMAGE}:latest" \
+            --cache-from type=registry,ref="${IMAGE}:buildcache" --cache-to type=registry,ref="${IMAGE}:buildcache",mode=max .
