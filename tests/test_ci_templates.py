@@ -13,7 +13,7 @@ from ci_templates.config import ConfigError, Pipeline
 from ci_templates.gitops import update_images
 from ci_templates.versions import service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
-from ci_templates.build import BuildError, build_service
+from ci_templates.build import BuildError, build_service, image_digest
 from ci_templates.argocd import _has_revision
 
 
@@ -147,6 +147,31 @@ class CiTemplatesTest(unittest.TestCase):
                 build_service(config().services[0])
 
         self.assertEqual(observed, [f'[registry."org"]\n  ca = ["{ca_path}"]\n'])
+
+    @patch("ci_templates.build.subprocess.run")
+    def test_image_digest_accepts_legacy_buildx_output(self, run):
+        digest = "sha256:" + "a" * 64
+        run.return_value = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=f"Name: org/gateway:dev\nMediaType: application/vnd.oci.image.manifest.v1+json\nDigest: {digest}\n",
+        )
+
+        self.assertEqual(image_digest("org/gateway:dev"), digest)
+
+    @patch("ci_templates.build.subprocess.run")
+    def test_image_digest_accepts_formatted_buildx_output(self, run):
+        digest = "sha256:" + "b" * 64
+        run.return_value = subprocess.CompletedProcess([], 0, stdout=f"{digest}\n")
+
+        self.assertEqual(image_digest("org/gateway:dev"), digest)
+
+    @patch("ci_templates.build.subprocess.run")
+    def test_image_digest_rejects_unrecognized_output(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, stdout="Digest: unavailable\n")
+
+        with self.assertRaisesRegex(BuildError, "cannot resolve digest"):
+            image_digest("org/gateway:dev")
 
     def test_chart_manifest_rejects_invalid_digest(self):
         import tempfile

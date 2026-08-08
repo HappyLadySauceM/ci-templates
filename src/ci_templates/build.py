@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import uuid
@@ -13,6 +14,9 @@ from .harbor import HarborClient, ImageRef
 
 class BuildError(RuntimeError):
     pass
+
+
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 def _docker(args: list[str], cwd: str = ".", check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -61,11 +65,19 @@ def build_service(service: Service, tag: str = "dev", cwd: str = ".") -> str:
 
 
 def image_digest(image: str, cwd: str = ".") -> str:
-    result = subprocess.run(["docker", "buildx", "imagetools", "inspect", image, "--format", "{{.Manifest.Digest}}"], cwd=cwd, check=True, capture_output=True, text=True)
-    digest = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
-    if not digest.startswith("sha256:"):
-        raise BuildError(f"cannot resolve digest for {image}")
-    return digest
+    try:
+        result = subprocess.run(["docker", "buildx", "imagetools", "inspect", image, "--format", "{{.Manifest.Digest}}"], cwd=cwd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        raise BuildError(f"cannot inspect digest for {image}") from exc
+    for line in reversed(result.stdout.splitlines()):
+        value = line.strip()
+        if _DIGEST_RE.fullmatch(value):
+            return value
+        if value.startswith("Digest:"):
+            digest = value.removeprefix("Digest:").strip()
+            if _DIGEST_RE.fullmatch(digest):
+                return digest
+    raise BuildError(f"cannot resolve digest for {image}")
 
 
 def discard_previous(service: Service, cwd: str = ".") -> None:
