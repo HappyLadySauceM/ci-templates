@@ -14,6 +14,7 @@ from ci_templates.gitops import update_images
 from ci_templates.versions import service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
 from ci_templates.build import build_service
+from ci_templates.argocd import _has_revision
 
 
 def config() -> Pipeline:
@@ -49,6 +50,12 @@ class CiTemplatesTest(unittest.TestCase):
 
     def test_service_tag(self):
         self.assertEqual(service_tag("gateway", (1, 2, 3)), "gateway-v1.2.3")
+
+    def test_argo_revision_supports_single_and_multi_source_applications(self):
+        revision = "a" * 40
+        self.assertTrue(_has_revision({"revision": revision}, revision))
+        self.assertTrue(_has_revision({"revisions": [revision, revision]}, revision))
+        self.assertFalse(_has_revision({"revisions": ["b" * 40]}, revision))
 
 
     def test_update_images(self):

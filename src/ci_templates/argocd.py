@@ -12,6 +12,13 @@ class ArgoError(RuntimeError):
     pass
 
 
+def _has_revision(sync: dict, revision: str) -> bool:
+    if sync.get("revision") == revision:
+        return True
+    revisions = sync.get("revisions", [])
+    return isinstance(revisions, list) and revision in revisions
+
+
 def wait_application(server: str, application: str, revision: str, timeout: int = 600) -> dict:
     kubeconfig = os.environ.get("KUBECONFIG", "")
     if kubeconfig:
@@ -27,7 +34,7 @@ def wait_application(server: str, application: str, revision: str, timeout: int 
                 status = payload.get("status", {})
                 sync = status.get("sync", {})
                 health = status.get("health", {})
-                if sync.get("revision") == revision and sync.get("status") == "Synced" and health.get("status") == "Healthy":
+                if _has_revision(sync, revision) and sync.get("status") == "Synced" and health.get("status") == "Healthy":
                     return payload
                 last_state = f"revision={sync.get('revision')} sync={sync.get('status')} health={health.get('status')}"
             else:
@@ -49,7 +56,7 @@ def wait_application(server: str, application: str, revision: str, timeout: int 
             status = payload.get("status", {})
             sync = status.get("sync", {})
             health = status.get("health", {})
-            if sync.get("revision") == revision and sync.get("status") == "Synced" and health.get("status") == "Healthy":
+            if _has_revision(sync, revision) and sync.get("status") == "Synced" and health.get("status") == "Healthy":
                 return payload
             last_state = f"revision={sync.get('revision')} sync={sync.get('status')} health={health.get('status')}"
         time.sleep(min(5, max(0, deadline - time.monotonic())))
