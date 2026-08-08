@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import uuid
 
@@ -20,7 +21,7 @@ _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 def _docker(args: list[str], cwd: str = ".", check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["docker", *args], cwd=cwd, check=check, text=True)
+    return subprocess.run(["docker", *args], cwd=cwd, check=check, stdout=sys.stderr, text=True)
 
 
 def build_service(service: Service, tag: str = "dev", cwd: str = ".") -> str:

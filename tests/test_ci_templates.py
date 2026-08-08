@@ -4,6 +4,7 @@ import hashlib
 import io
 import tarfile
 import subprocess
+import sys
 from unittest.mock import call, patch
 
 import unittest
@@ -13,7 +14,7 @@ from ci_templates.config import ConfigError, Pipeline
 from ci_templates.gitops import update_images
 from ci_templates.versions import service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
-from ci_templates.build import BuildError, build_service, image_digest
+from ci_templates.build import BuildError, _docker, build_service, image_digest
 from ci_templates.argocd import _has_revision
 
 
@@ -38,6 +39,14 @@ class CiTemplatesTest(unittest.TestCase):
     def test_config_requires_services(self):
         with self.assertRaises(ConfigError):
             Pipeline.from_mapping({"project": "example"})
+
+    @patch("ci_templates.build.subprocess.run")
+    def test_docker_progress_is_written_to_stderr(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0)
+
+        _docker(["pull", "org/gateway:dev"])
+
+        self.assertIs(run.call_args.kwargs["stdout"], sys.stderr)
 
 
     def test_shared_changes_rebuild_service(self):
