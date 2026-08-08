@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 import subprocess
+import tempfile
 import uuid
 
 from .config import Service
@@ -19,12 +23,27 @@ def build_service(service: Service, tag: str = "dev", cwd: str = ".") -> str:
     image = f"{service.image_repository}:{tag}"
     cache = f"{service.image_repository}:buildcache"
     builder = f"ci-templates-{service.name}-{uuid.uuid4().hex[:12]}"
+    buildkit_config: tempfile.TemporaryDirectory[str] | None = None
     try:
         current = _docker(["pull", f"{service.image_repository}:dev"], cwd=cwd, check=False)
         if current.returncode == 0:
             _docker(["tag", f"{service.image_repository}:dev", f"{service.image_repository}:previous"], cwd=cwd)
             _docker(["push", f"{service.image_repository}:previous"], cwd=cwd)
-        _docker(["buildx", "create", "--driver", "docker-container", "--name", builder], cwd=cwd)
+        create_args = ["buildx", "create", "--driver", "docker-container", "--name", builder]
+        registry_ca = os.environ.get("CI_REGISTRY_CA_FILE", "").strip()
+        if registry_ca:
+            ca_path = Path(registry_ca)
+            if not ca_path.is_file():
+                raise BuildError("registry CA file is unavailable")
+            registry = service.image_repository.split("/", 1)[0]
+            buildkit_config = tempfile.TemporaryDirectory(prefix="ci-templates-buildkit-")
+            config_path = Path(buildkit_config.name) / "buildkitd.toml"
+            config_path.write_text(
+                f"[registry.{json.dumps(registry)}]\n  ca = [{json.dumps(str(ca_path))}]\n",
+                encoding="utf-8",
+            )
+            create_args.extend(["--buildkitd-config", str(config_path)])
+        _docker(create_args, cwd=cwd)
         _docker([
             "buildx", "build", "--builder", builder, "--push", "--provenance=false", "--sbom=false",
             "--file", service.dockerfile, "--tag", image,
@@ -36,6 +55,8 @@ def build_service(service: Service, tag: str = "dev", cwd: str = ".") -> str:
         raise BuildError(f"image build failed for {service.name}") from exc
     finally:
         _docker(["buildx", "rm", "--force", builder], cwd=cwd, check=False)
+        if buildkit_config is not None:
+            buildkit_config.cleanup()
     return image
 
 

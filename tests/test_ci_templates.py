@@ -128,6 +128,26 @@ class CiTemplatesTest(unittest.TestCase):
         builder = docker.call_args_list[1].args[0][-1]
         self.assertEqual(docker.call_args_list[-1], call(["buildx", "rm", "--force", builder], cwd=".", check=False))
 
+    @patch("ci_templates.build._docker")
+    def test_build_configures_private_registry_ca(self, docker):
+        import tempfile
+        observed = []
+
+        def run(args, **_kwargs):
+            if args[:2] == ["buildx", "create"]:
+                config_path = Path(args[args.index("--buildkitd-config") + 1])
+                observed.append(config_path.read_text(encoding="utf-8"))
+            return subprocess.CompletedProcess([], 1 if args[0] == "pull" else 0)
+
+        docker.side_effect = run
+        with tempfile.TemporaryDirectory() as directory:
+            ca_path = Path(directory) / "registry-ca.crt"
+            ca_path.write_text("test CA\n", encoding="utf-8")
+            with patch.dict("os.environ", {"CI_REGISTRY_CA_FILE": str(ca_path)}):
+                build_service(config().services[0])
+
+        self.assertEqual(observed, [f'[registry."org"]\n  ca = ["{ca_path}"]\n'])
+
     def test_chart_manifest_rejects_invalid_digest(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:

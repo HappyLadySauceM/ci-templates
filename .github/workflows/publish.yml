@@ -36,6 +36,7 @@ jobs:
           printf '%s' "$HARBOR_CA_PEM" > "$RUNNER_TEMP/ci-templates-harbor/ca.crt"
           echo "DOCKER_CONFIG=$RUNNER_TEMP/ci-templates-harbor" >> "$GITHUB_ENV"
           echo "SSL_CERT_FILE=$RUNNER_TEMP/ci-templates-harbor/ca.crt" >> "$GITHUB_ENV"
+          echo "CI_REGISTRY_CA_FILE=$RUNNER_TEMP/ci-templates-harbor/ca.crt" >> "$GITHUB_ENV"
         env:
           HARBOR_DOCKER_CONFIG_JSON: ${{ secrets.HARBOR_DOCKER_CONFIG_JSON }}
           HARBOR_CA_PEM: ${{ secrets.HARBOR_CA_PEM }}
@@ -43,8 +44,10 @@ jobs:
         run: |
           version="$(tr -d '[:space:]' < VERSION)"
           builder="ci-templates-publish-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          buildkit_config="$RUNNER_TEMP/ci-templates-buildkit.toml"
+          printf '[registry."harbor.happyladysauce.local"]\n  ca = ["%s"]\n' "$CI_REGISTRY_CA_FILE" > "$buildkit_config"
           trap 'docker buildx rm --force "$builder" >/dev/null 2>&1 || true' EXIT
-          docker buildx create --driver docker-container --name "$builder"
+          docker buildx create --driver docker-container --name "$builder" --buildkitd-config "$buildkit_config"
           docker buildx build --builder "$builder" --load --tag "${IMAGE}:${GITHUB_SHA}" --tag "${IMAGE}:v${version}" --tag "${IMAGE}:latest" \
             --cache-from type=registry,ref="${IMAGE}:buildcache" --cache-to type=registry,ref="${IMAGE}:buildcache",mode=max .
           docker run --rm --entrypoint /bin/sh "${IMAGE}:${GITHUB_SHA}" -c \
