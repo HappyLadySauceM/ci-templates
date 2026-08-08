@@ -18,9 +18,10 @@ def build_service(service: Service, tag: str = "dev", cwd: str = ".") -> str:
     image = f"{service.image_repository}:{tag}"
     cache = f"{service.image_repository}:buildcache"
     try:
-        _docker(["pull", f"{service.image_repository}:dev"], cwd=cwd, check=False)
-        _docker(["tag", f"{service.image_repository}:dev", f"{service.image_repository}:previous"], cwd=cwd, check=False)
-        _docker(["push", f"{service.image_repository}:previous"], cwd=cwd, check=False)
+        current = _docker(["pull", f"{service.image_repository}:dev"], cwd=cwd, check=False)
+        if current.returncode == 0:
+            _docker(["tag", f"{service.image_repository}:dev", f"{service.image_repository}:previous"], cwd=cwd)
+            _docker(["push", f"{service.image_repository}:previous"], cwd=cwd)
         _docker([
             "buildx", "build", "--push", "--provenance=false", "--sbom=false",
             "--file", service.dockerfile, "--tag", image,

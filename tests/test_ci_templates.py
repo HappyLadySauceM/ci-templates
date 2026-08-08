@@ -3,6 +3,8 @@ from pathlib import Path
 import hashlib
 import io
 import tarfile
+import subprocess
+from unittest.mock import call, patch
 
 import unittest
 
@@ -11,6 +13,7 @@ from ci_templates.config import ConfigError, Pipeline
 from ci_templates.gitops import update_images
 from ci_templates.versions import service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
+from ci_templates.build import build_service
 
 
 def config() -> Pipeline:
@@ -57,6 +60,38 @@ class CiTemplatesTest(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("digest: sha256:abc", text)
             self.assertNotIn("newTag: old", text)
+
+    @patch("ci_templates.build._docker")
+    def test_build_preserves_existing_dev_before_replacement(self, docker):
+        docker.side_effect = [
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0),
+        ]
+
+        build_service(config().services[0])
+
+        self.assertEqual(
+            docker.call_args_list[:3],
+            [
+                call(["pull", "org/gateway:dev"], cwd=".", check=False),
+                call(["tag", "org/gateway:dev", "org/gateway:previous"], cwd="."),
+                call(["push", "org/gateway:previous"], cwd="."),
+            ],
+        )
+
+    @patch("ci_templates.build._docker")
+    def test_first_build_does_not_require_previous_image(self, docker):
+        docker.side_effect = [
+            subprocess.CompletedProcess([], 1),
+            subprocess.CompletedProcess([], 0),
+        ]
+
+        build_service(config().services[0])
+
+        self.assertEqual(docker.call_count, 2)
+        self.assertEqual(docker.call_args_list[1].args[0][:3], ["buildx", "build", "--push"])
 
     def test_chart_manifest_rejects_invalid_digest(self):
         import tempfile
