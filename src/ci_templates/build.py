@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import uuid
 
 from .config import Service
 from .harbor import HarborClient, ImageRef
@@ -17,13 +18,15 @@ def _docker(args: list[str], cwd: str = ".", check: bool = True) -> subprocess.C
 def build_service(service: Service, tag: str = "dev", cwd: str = ".") -> str:
     image = f"{service.image_repository}:{tag}"
     cache = f"{service.image_repository}:buildcache"
+    builder = f"ci-templates-{service.name}-{uuid.uuid4().hex[:12]}"
     try:
         current = _docker(["pull", f"{service.image_repository}:dev"], cwd=cwd, check=False)
         if current.returncode == 0:
             _docker(["tag", f"{service.image_repository}:dev", f"{service.image_repository}:previous"], cwd=cwd)
             _docker(["push", f"{service.image_repository}:previous"], cwd=cwd)
+        _docker(["buildx", "create", "--driver", "docker-container", "--name", builder], cwd=cwd)
         _docker([
-            "buildx", "build", "--push", "--provenance=false", "--sbom=false",
+            "buildx", "build", "--builder", builder, "--push", "--provenance=false", "--sbom=false",
             "--file", service.dockerfile, "--tag", image,
             "--cache-from", f"type=registry,ref={cache}",
             "--cache-to", f"type=registry,ref={cache},mode=max",
@@ -31,6 +34,8 @@ def build_service(service: Service, tag: str = "dev", cwd: str = ".") -> str:
         ], cwd=cwd)
     except subprocess.CalledProcessError as exc:
         raise BuildError(f"image build failed for {service.name}") from exc
+    finally:
+        _docker(["buildx", "rm", "--force", builder], cwd=cwd, check=False)
     return image
 
 
