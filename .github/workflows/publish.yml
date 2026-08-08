@@ -20,9 +20,7 @@ env:
 
 jobs:
   test-and-publish:
-    runs-on:
-      group: Knowledge-Core CI
-      labels: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - name: Install package test dependencies
