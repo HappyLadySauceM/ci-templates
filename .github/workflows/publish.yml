@@ -42,5 +42,10 @@ jobs:
       - name: Build and push control image
         run: |
           version="$(tr -d '[:space:]' < VERSION)"
-          docker buildx build --push --tag "${IMAGE}:${GITHUB_SHA}" --tag "${IMAGE}:v${version}" --tag "${IMAGE}:latest" \
+          docker buildx build --load --tag "${IMAGE}:${GITHUB_SHA}" --tag "${IMAGE}:v${version}" --tag "${IMAGE}:latest" \
             --cache-from type=registry,ref="${IMAGE}:buildcache" --cache-to type=registry,ref="${IMAGE}:buildcache",mode=max .
+          docker run --rm --entrypoint /bin/sh "${IMAGE}:${GITHUB_SHA}" -c \
+            'ci-templates --help >/dev/null && docker --version && docker buildx version && kubectl version --client && helm version --short && skopeo --version'
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:v${version}"
+          docker push "${IMAGE}:latest"

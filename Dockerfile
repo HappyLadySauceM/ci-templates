@@ -15,7 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git jq openssh-client docker.io docker-buildx skopeo \
+    && apt-get install -y --no-install-recommends ca-certificates curl git jq openssh-client docker-cli docker-buildx skopeo \
     && rm -rf /var/lib/apt/lists/* \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in amd64) kubectl_arch=amd64; helm_sha256="${HELM_AMD64_SHA256}" ;; arm64) kubectl_arch=arm64; helm_sha256="${HELM_ARM64_SHA256}" ;; *) echo "unsupported architecture: $arch" >&2; exit 1 ;; esac \
