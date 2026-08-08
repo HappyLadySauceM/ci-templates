@@ -1,5 +1,8 @@
 import json
 from pathlib import Path
+import hashlib
+import io
+import tarfile
 
 import unittest
 
@@ -7,6 +10,7 @@ from ci_templates.changes import affected_services
 from ci_templates.config import ConfigError, Pipeline
 from ci_templates.gitops import update_images
 from ci_templates.versions import service_tag
+from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
 
 
 def config() -> Pipeline:
@@ -53,3 +57,49 @@ class CiTemplatesTest(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("digest: sha256:abc", text)
             self.assertNotIn("newTag: old", text)
+
+    def test_chart_manifest_rejects_invalid_digest(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "charts.yaml"
+            path.write_text("""version: 1
+destination: oci://registry.example/charts
+charts:
+- name: example
+  repository: https://charts.example
+  version: 1.0.0
+  sha256: invalid
+  targetVersion: 1.0.0
+  releaseName: example
+  namespace: example
+""", encoding="utf-8")
+            with self.assertRaises(ChartError):
+                load_chart_manifest(path)
+
+    def test_chart_paths_cannot_escape_repository(self):
+        with self.assertRaises(ChartError):
+            _relative_path("../secret.yaml", "test")
+
+    def test_chart_render_rejects_secret(self):
+        chart = Chart("example", "https://charts.example", "1", "a" * 64, "1", "example", "default", (), False, (), (), None)
+        rendered = b"apiVersion: v1\nkind: Secret\nmetadata:\n  name: forbidden\n"
+        with self.assertRaisesRegex(ChartError, "forbidden Secret"):
+            _validate_rendered(chart, rendered)
+
+    def test_chart_render_rejects_duplicate_resource(self):
+        chart = Chart("example", "https://charts.example", "1", "a" * 64, "1", "example", "default", (), False, (), (), None)
+        resource = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: duplicate\n"
+        with self.assertRaisesRegex(ChartError, "duplicate resources"):
+            _validate_rendered(chart, (resource + "---\n" + resource).encode())
+
+    def test_chart_archive_rejects_path_traversal(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "chart.tgz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                content = b"unsafe"
+                member = tarfile.TarInfo("../unsafe")
+                member.size = len(content)
+                bundle.addfile(member, io.BytesIO(content))
+            with self.assertRaisesRegex(ChartError, "unsafe path"):
+                _extract_chart(archive, Path(directory) / "extract")

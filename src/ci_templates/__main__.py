@@ -15,6 +15,7 @@ from .smoke import run as run_smoke, run_kubernetes
 from .github import create_release, fast_forward_main, set_commit_status
 from .release import summarize_with_deepseek
 from .versions import next_patch, read_version, service_tag
+from .charts import ChartError, check_charts, format_result, mirror_charts
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -86,6 +87,15 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--description", required=True)
     status.add_argument("--context", default="knowledge-core/smoke")
     status.add_argument("--target-url", default="")
+
+    charts_check = subparsers.add_parser("charts-check")
+    charts_check.add_argument("--manifest", required=True)
+    charts_check.add_argument("--root", default=".")
+    charts_check.add_argument("--allow-missing-vendors", action="store_true")
+
+    charts_mirror = subparsers.add_parser("charts-mirror")
+    charts_mirror.add_argument("--manifest", required=True)
+    charts_mirror.add_argument("--root", default=".")
 
     args = parser.parse_args(argv)
     try:
@@ -173,7 +183,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "status":
             config = load_config(args.config)
             set_commit_status(config.source_repo, args.sha, args.state, args.description, args.context, args.target_url)
-    except (ConfigError, OSError, ValueError, RuntimeError) as exc:
+        elif args.command == "charts-check":
+            print(format_result(check_charts(args.manifest, args.root, not args.allow_missing_vendors)))
+        elif args.command == "charts-mirror":
+            print(format_result(mirror_charts(args.manifest, args.root)))
+    except (ChartError, ConfigError, OSError, ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     return 0
