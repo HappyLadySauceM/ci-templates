@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import base64
 import os
@@ -13,6 +14,10 @@ import yaml
 
 class GitOpsError(RuntimeError):
     pass
+
+
+def _git(args: list[str], *, cwd: str | Path | None = None, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=cwd, check=check, env=env, stdout=sys.stderr, text=True)
 
 
 def sync_snapshot(source_root: str | Path, snapshot_root: str | Path) -> None:
@@ -71,14 +76,19 @@ def promote_snapshot(source_deploy: str | Path, gitops_repo: str, gitops_path: s
             update_images(worktree / gitops_path / kustomization, image_overrides)
         marker = worktree / gitops_path / ".source-revision"
         marker.write_text(source_sha.strip() + "\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(worktree), "config", "user.name", "knowledge-core-ci"], check=True)
-        subprocess.run(["git", "-C", str(worktree), "config", "user.email", "knowledge-core-ci@noreply.local"], check=True)
-        subprocess.run(["git", "-C", str(worktree), "add", str(Path(gitops_path) / "deploy"), str(Path(gitops_path) / ".source-revision")], check=True)
-        changed = subprocess.run(["git", "-C", str(worktree), "diff", "--cached", "--quiet"], check=False)
+        _git(["config", "user.name", "knowledge-core-ci"], cwd=worktree)
+        _git(["config", "user.email", "knowledge-core-ci@noreply.local"], cwd=worktree)
+        _git([
+            "add",
+            str(Path(gitops_path) / "deploy"),
+            str(Path(gitops_path) / ".source-revision"),
+            str(Path(gitops_path) / kustomization),
+        ], cwd=worktree)
+        changed = _git(["diff", "--cached", "--quiet"], cwd=worktree, check=False)
         if changed.returncode == 0:
             return base_revision, base_revision
-        subprocess.run(["git", "-C", str(worktree), "commit", "-m", f"chore({gitops_path}): sync deploy from {source_sha[:12]}"], check=True)
-        subprocess.run(["git", *git_args, "-C", str(worktree), "push", "origin", f"HEAD:{branch}"], check=True, env=git_env)
+        _git(["commit", "-m", f"chore({gitops_path}): sync deploy from {source_sha[:12]}"], cwd=worktree)
+        _git([*git_args, "push", "origin", f"HEAD:{branch}"], cwd=worktree, env=git_env)
         return subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip(), base_revision
 
 
@@ -98,6 +108,6 @@ def rollback_snapshot(gitops_repo: str, branch: str, revision: str) -> str:
         head = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
         if head != revision:
             raise GitOpsError("GitOps branch moved before rollback; refusing to overwrite it")
-        subprocess.run(["git", "-C", str(worktree), "revert", "--no-edit", revision], check=True)
-        subprocess.run(["git", *git_args, "-C", str(worktree), "push", "origin", f"HEAD:{branch}"], check=True, env=git_env)
+        _git(["revert", "--no-edit", revision], cwd=worktree)
+        _git([*git_args, "push", "origin", f"HEAD:{branch}"], cwd=worktree, env=git_env)
         return subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()

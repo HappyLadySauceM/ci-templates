@@ -11,7 +11,7 @@ import unittest
 
 from ci_templates.changes import affected_services
 from ci_templates.config import ConfigError, Pipeline
-from ci_templates.gitops import update_images
+from ci_templates.gitops import _git, promote_snapshot, update_images
 from ci_templates.versions import service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
 from ci_templates.build import BuildError, _docker, build_service, image_digest
@@ -48,6 +48,14 @@ class CiTemplatesTest(unittest.TestCase):
 
         self.assertIs(run.call_args.kwargs["stdout"], sys.stderr)
 
+    @patch("ci_templates.gitops.subprocess.run")
+    def test_git_progress_is_written_to_stderr(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0)
+
+        _git(["status"])
+
+        self.assertIs(run.call_args.kwargs["stdout"], sys.stderr)
+
 
     def test_shared_changes_rebuild_service(self):
         self.assertEqual(affected_services(config(), ["pkg/auth/token.go"]), ("gateway",))
@@ -76,6 +84,47 @@ class CiTemplatesTest(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("digest: sha256:abc", text)
             self.assertNotIn("newTag: old", text)
+
+    def test_promote_snapshot_commits_image_digest(self):
+        import tempfile
+
+        def git(*args, cwd=None):
+            return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            (source / "deployment.yaml").write_text("apiVersion: apps/v1\nkind: Deployment\n", encoding="utf-8")
+            remote = root / "remote.git"
+            seed = root / "seed"
+            git("init", "--bare", str(remote))
+            git("init", "--initial-branch", "main", str(seed))
+            (seed / "Example" / "deploy").mkdir(parents=True)
+            (seed / "Example" / "deploy" / "old.yaml").write_text("old\n", encoding="utf-8")
+            (seed / "Example" / "kustomization.yaml").write_text(
+                "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nimages:\n- name: example\n  newTag: old\n",
+                encoding="utf-8",
+            )
+            git("add", ".", cwd=seed)
+            git("-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial", cwd=seed)
+            git("remote", "add", "origin", str(remote), cwd=seed)
+            git("push", "origin", "main", cwd=seed)
+
+            digest = "sha256:" + "c" * 64
+            revision, _ = promote_snapshot(
+                source,
+                str(remote),
+                "Example",
+                "kustomization.yaml",
+                "main",
+                "a" * 40,
+                {"example": {"newName": "registry/example", "digest": digest}},
+            )
+
+            rendered = git("--git-dir", str(remote), "show", f"{revision}:Example/kustomization.yaml").stdout
+            self.assertIn(f"digest: {digest}", rendered)
+            self.assertNotIn("newTag: old", rendered)
 
     @patch("ci_templates.build._docker")
     def test_build_preserves_existing_dev_before_replacement(self, docker):
