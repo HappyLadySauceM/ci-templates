@@ -5,16 +5,17 @@ import json
 import sys
 import os
 import subprocess
+from pathlib import Path
 
-from .changes import affected_services, changed_paths
+from .changes import affected_services, build_release_context, changed_paths, read_release_context, resolve_revision, write_release_context
 from .config import ConfigError, load_config
 from .gitops import sync_snapshot, promote_snapshot, rollback_snapshot
 from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest
 from .argocd import wait_application
 from .smoke import run as run_smoke, run_kubernetes
 from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
-from .release import summarize_with_deepseek
-from .versions import next_patch, read_version, release_tag, service_tag
+from .release import render_aggregate_release, summarize_with_deepseek
+from .versions import aggregate_release_tag, next_patch, read_version, release_tag, service_tag
 from .charts import ChartError, check_charts, format_result, mirror_charts
 
 
@@ -29,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     changes.add_argument("--config", default=None)
     changes.add_argument("--base", required=True)
     changes.add_argument("--head", default="HEAD")
+    changes.add_argument("--details-file", default=None)
 
     versions = subparsers.add_parser("versions")
     versions.add_argument("--config", default=None)
@@ -75,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     release.add_argument("--config", default=None)
     release.add_argument("--services", required=True)
     release.add_argument("--repo", default=".")
+    release.add_argument("--changes-file", default=None)
 
     prewarm = subparsers.add_parser("prewarm")
     prewarm.add_argument("--config", default=None)
@@ -105,13 +108,20 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "changes":
             config = load_config(args.config)
             paths = changed_paths(args.base, args.head)
+            if args.details_file:
+                resolved_base = resolve_revision(args.base) if args.base and set(args.base) != {"0"} else args.base
+                resolved_head = resolve_revision(args.head)
+                write_release_context(
+                    args.details_file,
+                    build_release_context(config, resolved_base, resolved_head, paths),
+                )
             print(json.dumps({"paths": paths, "services": list(affected_services(config, paths))}, sort_keys=True))
         elif args.command == "versions":
             config = load_config(args.config)
             selected = [service for service in config.services if args.service is None or service.name == args.service]
             output = {}
             for service in selected:
-                version = read_version(service.version_file)
+                version = read_version(Path(args.repo) / service.version_file)
                 release = next_patch(service.name, version, cwd=args.repo)
                 output[service.name] = {"version": ".".join(map(str, version)), "tag": service_tag(service.name, release)}
             print(json.dumps(output, sort_keys=True))
@@ -157,19 +167,43 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "release":
             config = load_config(args.config)
             selected = {item.strip() for item in args.services.split(",") if item.strip()}
-            metadata = json.loads(os.environ.get("CI_RELEASE_METADATA_JSON", "{}"))
+            changes_file = args.changes_file or os.environ.get("CI_RELEASE_CHANGES_FILE", "")
+            if not changes_file:
+                raise ConfigError("CI_RELEASE_CHANGES_FILE or --changes-file is required before main promotion")
+            context = read_release_context(changes_file)
+            current_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=args.repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            context_head = context.get("head")
+            if context_head and context_head != current_commit:
+                raise ConfigError("release change context does not match the checked-out commit")
             summaries: dict[str, str] = {}
             release_tags: list[tuple[str, str, str]] = []
-            from .versions import read_version, release_tag
             for service in config.services:
                 if service.name not in selected:
                     continue
-                base_version = read_version(service.version_file)
+                base_version = read_version(Path(args.repo) / service.version_file)
                 tag = release_tag(service.name, base_version, cwd=args.repo)
-                summaries[service.name] = summarize_with_deepseek(config.deepseek_model, service.name, tag, {str(key): str(value) for key, value in metadata.items()})
+                service_changes = context.get("services", {}).get(service.name)
+                if not isinstance(service_changes, dict):
+                    raise ConfigError(f"release change context is missing service {service.name}")
+                summaries[service.name] = summarize_with_deepseek(
+                    config.deepseek_model,
+                    service.name,
+                    tag,
+                    service_changes,
+                    config.release_language,
+                )
                 release_tags.append((service.name, tag, summaries[service.name]))
             if not release_tags:
                 raise ConfigError("no affected services selected for release")
+            aggregate_version = read_version(Path(args.repo) / config.aggregate_version_file)
+            aggregate_tag = aggregate_release_tag(config.aggregate_release_prefix, aggregate_version, cwd=args.repo)
+            release_body = render_aggregate_release(config.project, aggregate_tag, release_tags)
             fast_forward_main(cwd=args.repo)
             target_commit = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
@@ -179,9 +213,16 @@ def main(argv: list[str] | None = None) -> int:
                 text=True,
             ).stdout.strip()
             for service_name, tag, summary in release_tags:
-                create_and_push_tag(tag, summary, cwd=args.repo)
-                create_release(config.source_repo, tag, target_commit, summary)
-            print(json.dumps({"services": [item[0] for item in release_tags], "tags": [item[1] for item in release_tags]}, sort_keys=True))
+                create_and_push_tag(tag, f"{config.project} service release {tag}", cwd=args.repo)
+            create_and_push_tag(aggregate_tag, f"{config.project} release {aggregate_tag}", cwd=args.repo)
+            create_release(
+                config.source_repo,
+                aggregate_tag,
+                target_commit,
+                release_body,
+                name=f"{config.project} {aggregate_tag}",
+            )
+            print(json.dumps({"services": [item[0] for item in release_tags], "tags": [item[1] for item in release_tags], "release": aggregate_tag}, sort_keys=True))
         elif args.command == "prewarm":
             config = load_config(args.config)
             prewarm_base_images(config.base_images, cwd=args.repo)

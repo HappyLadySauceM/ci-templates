@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ci-templates"
-version = "1.0.14"
+version = "1.1.0"
 description = "Reusable Python CI/CD control plane for HappyLadySauce projects"
 requires-python = ">=3.10"
 dependencies = ["PyYAML>=6.0,<7"]

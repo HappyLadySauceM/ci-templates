@@ -1,12 +1,13 @@
-name: publish-ci-templates
+name: ci-templates-publish
 
 on:
   push:
     branches: [main]
     paths:
       - Dockerfile
-      - VERSION
       - pyproject.toml
+      - VERSION
+      - README.md
       - src/**
       - tests/**
       - .github/workflows/publish.yml
@@ -15,43 +16,58 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-templates-publish-main
+  cancel-in-progress: false
+
 env:
-  IMAGE: harbor.happyladysauce.local/knowledge-core/ci-templates
+  CI_IMAGE: harbor.happyladysauce.local/knowledge-core/ci-templates
 
 jobs:
-  test-and-publish:
+  publish:
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
-      - name: Install package test dependencies
-        run: python3 -m pip install --user --no-warn-script-location .
-      - name: Test Python package
-        run: PYTHONPATH=src python3 -m unittest discover -s tests -v
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run template tests
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python3 -m unittest discover -s tests -v
+          python3 -m compileall -q src
+
       - name: Prepare Harbor credentials
+        env:
+          HARBOR_DOCKER_CONFIG_JSON: ${{ secrets.HARBOR_DOCKER_CONFIG_JSON }}
+          HARBOR_CA_PEM: ${{ secrets.HARBOR_CA_PEM }}
         run: |
           set -euo pipefail
           umask 077
           install -d "$RUNNER_TEMP/ci-templates-harbor"
           printf '%s' "$HARBOR_DOCKER_CONFIG_JSON" > "$RUNNER_TEMP/ci-templates-harbor/config.json"
           printf '%s' "$HARBOR_CA_PEM" > "$RUNNER_TEMP/ci-templates-harbor/ca.crt"
+          test -s "$RUNNER_TEMP/ci-templates-harbor/config.json"
+          test -s "$RUNNER_TEMP/ci-templates-harbor/ca.crt"
           echo "DOCKER_CONFIG=$RUNNER_TEMP/ci-templates-harbor" >> "$GITHUB_ENV"
           echo "SSL_CERT_FILE=$RUNNER_TEMP/ci-templates-harbor/ca.crt" >> "$GITHUB_ENV"
-          echo "CI_REGISTRY_CA_FILE=$RUNNER_TEMP/ci-templates-harbor/ca.crt" >> "$GITHUB_ENV"
-        env:
-          HARBOR_DOCKER_CONFIG_JSON: ${{ secrets.HARBOR_DOCKER_CONFIG_JSON }}
-          HARBOR_CA_PEM: ${{ secrets.HARBOR_CA_PEM }}
-      - name: Build and push control image
+
+      - name: Build and push versioned control image
         run: |
+          set -euo pipefail
           version="$(tr -d '[:space:]' < VERSION)"
-          builder="ci-templates-publish-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          buildkit_config="$RUNNER_TEMP/ci-templates-buildkit.toml"
-          printf '[registry."harbor.happyladysauce.local"]\n  ca = ["%s"]\n' "$CI_REGISTRY_CA_FILE" > "$buildkit_config"
-          trap 'docker buildx rm --force "$builder" >/dev/null 2>&1 || true' EXIT
-          docker buildx create --driver docker-container --name "$builder" --buildkitd-config "$buildkit_config"
-          docker buildx build --builder "$builder" --load --tag "${IMAGE}:${GITHUB_SHA}" --tag "${IMAGE}:v${version}" --tag "${IMAGE}:latest" \
-            --cache-from type=registry,ref="${IMAGE}:buildcache" --cache-to type=registry,ref="${IMAGE}:buildcache",mode=max .
-          docker run --rm --entrypoint /bin/sh "${IMAGE}:${GITHUB_SHA}" -c \
-            'ci-templates --help >/dev/null && docker --version && docker buildx version && kubectl version --client && helm version --short && skopeo --version'
-          docker push "${IMAGE}:${GITHUB_SHA}"
-          docker push "${IMAGE}:v${version}"
-          docker push "${IMAGE}:latest"
+          case "$version" in
+            ''|*[!0-9.]*|.*|*.)
+              echo "invalid VERSION: $version" >&2
+              exit 1
+              ;;
+          esac
+          image="$CI_IMAGE:v$version"
+          docker build --tag "$image" .
+          docker push "$image"
+          digest="$(docker buildx imagetools inspect "$image" | awk '/^Digest:/ {print $2; exit}')"
+          test -n "$digest"
+          echo "Published $image@$digest"
+          {
+            echo "### Published control image"
+            echo
+            echo '\`'"$image@$digest"'\`'
+          } >> "$GITHUB_STEP_SUMMARY"

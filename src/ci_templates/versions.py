@@ -20,6 +20,10 @@ def service_tag(service: str, version: tuple[int, int, int]) -> str:
     return f"{service}-v{version[0]}.{version[1]}.{version[2]}"
 
 
+def aggregate_tag(prefix: str, version: tuple[int, int, int]) -> str:
+    return f"{prefix}-v{version[0]}.{version[1]}.{version[2]}"
+
+
 def next_patch(service: str, version: tuple[int, int, int], cwd: str = ".") -> tuple[int, int, int]:
     prefix = f"{service}-v{version[0]}.{version[1]}."
     result = subprocess.run(["git", "tag", "--list", f"{prefix}*"], cwd=cwd, check=True, capture_output=True, text=True)
@@ -44,3 +48,26 @@ def release_tag(service: str, version: tuple[int, int, int], cwd: str = ".") -> 
     if patches:
         return service_tag(service, (version[0], version[1], max(patches)))
     return service_tag(service, next_patch(service, version, cwd=cwd))
+
+
+def aggregate_release_tag(prefix: str, version: tuple[int, int, int], cwd: str = ".") -> str:
+    tag_prefix = f"{prefix}-v{version[0]}.{version[1]}."
+    result = subprocess.run(
+        ["git", "tag", "--points-at", "HEAD", "--list", f"{tag_prefix}*"],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    current = [int(tag.removeprefix(tag_prefix)) for tag in result.stdout.splitlines() if tag.removeprefix(tag_prefix).isdigit()]
+    if current:
+        return aggregate_tag(prefix, (version[0], version[1], max(current)))
+    result = subprocess.run(
+        ["git", "tag", "--list", f"{tag_prefix}*"],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    existing = [int(tag.removeprefix(tag_prefix)) for tag in result.stdout.splitlines() if tag.removeprefix(tag_prefix).isdigit()]
+    return aggregate_tag(prefix, (version[0], version[1], max(existing, default=0) + 1))

@@ -50,6 +50,9 @@ class Pipeline:
     smoke_command: tuple[str, ...]
     release_model: str
     deepseek_model: str
+    aggregate_release_prefix: str
+    aggregate_version_file: str
+    release_language: str
     base_images: tuple[tuple[str, str], ...]
 
     @classmethod
@@ -58,6 +61,8 @@ class Pipeline:
         missing = [field for field in required if not value.get(field)]
         if missing:
             raise ConfigError(f"pipeline is missing fields: {', '.join(missing)}")
+        if not isinstance(value["project"], str) or not value["project"].strip():
+            raise ConfigError("project must be a non-empty string")
         raw_services = value["services"]
         if not isinstance(raw_services, list) or not raw_services:
             raise ConfigError("services must be a non-empty list")
@@ -76,6 +81,12 @@ class Pipeline:
             if not isinstance(item, dict) or not isinstance(item.get("source"), str) or not isinstance(item.get("destination"), str):
                 raise ConfigError("each base image requires source and destination")
             base_images.append((item["source"], item["destination"]))
+        project_slug = value["project"].strip().lower().replace(" ", "-")
+        aggregate_prefix = value.get("aggregate_release_prefix", project_slug)
+        aggregate_version_file = value.get("aggregate_version_file", "VERSION")
+        release_language = value.get("release_language", "en")
+        if not all(isinstance(item, str) and item.strip() for item in (aggregate_prefix, aggregate_version_file, release_language)):
+            raise ConfigError("aggregate release settings must be non-empty strings")
         return cls(
             project=value["project"],
             source_repo=value["source_repo"],
@@ -92,6 +103,9 @@ class Pipeline:
             smoke_command=tuple(smoke),
             release_model=value.get("release_model", "git-independent-service"),
             deepseek_model=value.get("deepseek_model", "deepseek-v4-flash"),
+            aggregate_release_prefix=aggregate_prefix,
+            aggregate_version_file=aggregate_version_file,
+            release_language=release_language,
             base_images=tuple(base_images),
         )
 

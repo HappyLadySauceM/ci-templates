@@ -35,12 +35,23 @@ def _request(method: str, endpoint: str, body: object | None = None, *, not_foun
     return json.loads(payload) if payload else {}
 
 
-def create_release(repository: str, tag: str, target: str, body: str) -> dict:
+def create_release(repository: str, tag: str, target: str, body: str, *, name: str | None = None) -> dict:
     endpoint = f"/repos/{repository}/releases/tags/{quote(tag, safe='')}"
     existing = _request("GET", endpoint, not_found_ok=True)
     if existing is not None:
         return existing
-    created = _request("POST", f"/repos/{repository}/releases", {"tag_name": tag, "target_commitish": target, "name": tag, "body": body, "draft": False, "prerelease": False})
+    created = _request(
+        "POST",
+        f"/repos/{repository}/releases",
+        {
+            "tag_name": tag,
+            "target_commitish": target,
+            "name": name or tag,
+            "body": body,
+            "draft": False,
+            "prerelease": False,
+        },
+    )
     assert created is not None
     return created
 

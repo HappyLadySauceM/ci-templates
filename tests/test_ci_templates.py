@@ -9,10 +9,10 @@ from unittest.mock import call, patch
 
 import unittest
 
-from ci_templates.changes import affected_services
+from ci_templates.changes import affected_services, build_release_context, read_release_context
 from ci_templates.config import ConfigError, Pipeline
 from ci_templates.gitops import _git, promote_snapshot, rollback_snapshot, update_images
-from ci_templates.versions import service_tag
+from ci_templates.versions import aggregate_release_tag, service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
 from ci_templates.build import BuildError, _docker, build_service, image_digest
 from ci_templates.argocd import _has_revision
@@ -61,6 +61,9 @@ class CiTemplatesTest(unittest.TestCase):
     def test_shared_changes_rebuild_service(self):
         self.assertEqual(affected_services(config(), ["pkg/auth/token.go"]), ("gateway",))
 
+    def test_dockerfile_change_rebuilds_service(self):
+        self.assertEqual(affected_services(config(), ["services/gateway/Dockerfile"]), ("gateway",))
+
 
     def test_unrelated_changes_are_ignored(self):
         self.assertEqual(affected_services(config(), ["docs/README.md"]), ())
@@ -68,6 +71,55 @@ class CiTemplatesTest(unittest.TestCase):
 
     def test_service_tag(self):
         self.assertEqual(service_tag("gateway", (1, 2, 3)), "gateway-v1.2.3")
+
+    def test_aggregate_release_tag_increments_only_aggregate_tags(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "test"], check=True)
+            (root / "VERSION").write_text("0.1\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "VERSION"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "init"], check=True)
+            subprocess.run(["git", "-C", str(root), "tag", "knowledge-core-v0.1.1"], check=True)
+            self.assertEqual(aggregate_release_tag("knowledge-core", (0, 1, 0), cwd=str(root)), "knowledge-core-v0.1.1")
+            (root / "VERSION").write_text("0.1\nchanged\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "VERSION"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "change"], check=True)
+            self.assertEqual(aggregate_release_tag("knowledge-core", (0, 1, 0), cwd=str(root)), "knowledge-core-v0.1.2")
+
+    def test_release_context_redacts_sensitive_values(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "test"], check=True)
+            (root / "services/gateway").mkdir(parents=True)
+            (root / "services/gateway/config.go").write_text(
+                'const token = "first"\nconst databaseURL = "postgres://user:first@db/knowledge"\n',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "init"], check=True)
+            (root / "services/gateway/config.go").write_text(
+                'const token = "second"\nconst databaseURL = "postgres://user:second@db/knowledge"\n',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "change"], check=True)
+            config_value = config()
+            context = build_release_context(config_value, "HEAD^", "HEAD", ["services/gateway/config.go"], cwd=str(root))
+            diff = context["services"]["gateway"]["diff"]
+            self.assertGreaterEqual(diff.count("[REDACTED SENSITIVE VALUE]"), 2)
+            self.assertNotIn("second@db", diff)
+
+            context_path = root / "release.json"
+            context_path.write_text(json.dumps(context), encoding="utf-8")
+            self.assertEqual(read_release_context(context_path)["base"], "HEAD^")
 
     def test_argo_revision_supports_single_and_multi_source_applications(self):
         revision = "a" * 40
@@ -112,7 +164,7 @@ class CiTemplatesTest(unittest.TestCase):
     @patch("ci_templates.__main__.summarize_with_deepseek", return_value="summary")
     @patch("ci_templates.__main__.subprocess.run")
     @patch("ci_templates.__main__.load_config")
-    def test_release_uses_commit_sha_for_github_release(
+    def test_release_creates_one_aggregate_github_release(
         self, load_config_mock, run, summarize, fast_forward, push_tag, create_release_mock
     ):
         load_config_mock.return_value = config()
@@ -120,15 +172,23 @@ class CiTemplatesTest(unittest.TestCase):
 
         from ci_templates.__main__ import main
 
-        with (
-            patch.dict("ci_templates.__main__.os.environ", {"CI_RELEASE_METADATA_JSON": "{}"}, clear=False),
-            patch("ci_templates.versions.read_version", return_value=(1, 2, 3)),
-            patch("ci_templates.versions.next_patch", return_value=(1, 2, 4)),
-            patch("ci_templates.versions.service_tag", return_value="gateway-v1.2.4"),
-        ):
-            self.assertEqual(main(["release", "--services", "gateway"]), 0)
+        import tempfile
 
-        create_release_mock.assert_called_once_with("org/example", "gateway-v1.2.4", "a" * 40, "summary")
+        with tempfile.TemporaryDirectory() as directory:
+            changes_file = Path(directory) / "changes.json"
+            changes_file.write_text(json.dumps({"services": {"gateway": {"paths": ["services/gateway/a.go"], "diff": "+ feature"}}}), encoding="utf-8")
+            with (
+                patch.dict("ci_templates.__main__.os.environ", {}, clear=False),
+                patch("ci_templates.__main__.read_version", return_value=(1, 2, 3)),
+                patch("ci_templates.versions.next_patch", return_value=(1, 2, 4)),
+                patch("ci_templates.versions.service_tag", return_value="gateway-v1.2.4"),
+            ):
+                self.assertEqual(main(["release", "--services", "gateway", "--changes-file", str(changes_file)]), 0)
+
+        create_release_mock.assert_called_once_with(
+            "org/example", "example-v1.2.1", "a" * 40, "# example example-v1.2.1\n\n## Functional changes\n\n### gateway · `gateway-v1.2.4`\n\nsummary\n\n## Service versions\n\n- gateway: `gateway-v1.2.4`\n",
+            name="example example-v1.2.1",
+        )
 
 
     def test_update_images(self):
