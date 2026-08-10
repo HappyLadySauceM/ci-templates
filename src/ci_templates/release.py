@@ -39,22 +39,26 @@ def summarize_with_deepseek(model: str, service: str, version: str, changes: dic
             "Return Markdown bullets only."
         ),
     }
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=True)}],
-        "temperature": 0.1,
-        "max_tokens": 900,
-    }
-    request = Request(endpoint, data=json.dumps(body).encode(), headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
-    try:
-        with urlopen(request, timeout=60) as response:
-            result = json.loads(response.read())
-    except (HTTPError, URLError, json.JSONDecodeError) as exc:
-        raise ReleaseError(f"DeepSeek release summary failed: {exc}") from exc
-    try:
-        summary = str(result["choices"][0]["message"]["content"]).strip()
-        if not summary:
-            raise ReleaseError("DeepSeek returned an empty response")
-        return summary[:8000]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ReleaseError("DeepSeek returned an invalid response") from exc
+    finish_reason = "unknown"
+    for max_tokens in (4096, 8192):
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=True)}],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+        }
+        request = Request(endpoint, data=json.dumps(body).encode(), headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
+        try:
+            with urlopen(request, timeout=120) as response:
+                result = json.loads(response.read())
+        except (HTTPError, URLError, json.JSONDecodeError) as exc:
+            raise ReleaseError(f"DeepSeek release summary failed: {exc}") from exc
+        try:
+            choice = result["choices"][0]
+            finish_reason = str(choice.get("finish_reason", "unknown"))
+            summary = str(choice["message"]["content"] or "").strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ReleaseError("DeepSeek returned an invalid response") from exc
+        if summary:
+            return summary[:8000]
+    raise ReleaseError(f"DeepSeek returned an empty response after retry (finish_reason={finish_reason})")
