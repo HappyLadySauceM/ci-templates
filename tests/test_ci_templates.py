@@ -100,6 +100,7 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertEqual([item.args[0] for item in run.call_args_list], [
             ["git", "config", "user.name", "happyladysauce-ci"],
             ["git", "config", "user.email", "happyladysauce-ci@noreply.local"],
+            ["git", "rev-parse", "--verify", "--quiet", "refs/tags/gateway-v0.1.1^{}"],
             ["git", "tag", "-a", "gateway-v0.1.1", "-m", "summary", "HEAD"],
             ["git", "push", "origin", "gateway-v0.1.1"],
         ])

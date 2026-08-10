@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
@@ -11,7 +12,7 @@ class GitHubError(RuntimeError):
     pass
 
 
-def _request(method: str, endpoint: str, body: object | None = None) -> dict:
+def _request(method: str, endpoint: str, body: object | None = None, *, not_found_ok: bool = False) -> dict | None:
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         raise GitHubError("GITHUB_TOKEN is required")
@@ -24,13 +25,24 @@ def _request(method: str, endpoint: str, body: object | None = None) -> dict:
     try:
         with urlopen(request, timeout=30) as response:
             payload = response.read()
-    except (HTTPError, URLError) as exc:
+    except HTTPError as exc:
+        if exc.code == 404 and not_found_ok:
+            return None
+        detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        raise GitHubError(f"GitHub API {method} {endpoint} failed: HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
         raise GitHubError(f"GitHub API {method} {endpoint} failed: {exc}") from exc
     return json.loads(payload) if payload else {}
 
 
 def create_release(repository: str, tag: str, target: str, body: str) -> dict:
-    return _request("POST", f"/repos/{repository}/releases", {"tag_name": tag, "target_commitish": target, "name": tag, "body": body, "draft": False, "prerelease": False})
+    endpoint = f"/repos/{repository}/releases/tags/{quote(tag, safe='')}"
+    existing = _request("GET", endpoint, not_found_ok=True)
+    if existing is not None:
+        return existing
+    created = _request("POST", f"/repos/{repository}/releases", {"tag_name": tag, "target_commitish": target, "name": tag, "body": body, "draft": False, "prerelease": False})
+    assert created is not None
+    return created
 
 
 def set_commit_status(repository: str, sha: str, state: str, description: str, context: str, target_url: str = "") -> dict:
@@ -68,5 +80,19 @@ def fast_forward_main(cwd: str = ".") -> None:
 def create_and_push_tag(tag: str, message: str, cwd: str = ".") -> None:
     env = _git_environment()
     _configure_identity(cwd, env)
+    existing = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{}}"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if existing.returncode == 0:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, check=True, capture_output=True, text=True, env=env
+        ).stdout.strip()
+        if existing.stdout.strip() != head:
+            raise GitHubError(f"tag {tag} already points to a different commit")
+        return
     subprocess.run(["git", "tag", "-a", tag, "-m", message, "HEAD"], cwd=cwd, check=True, env=env)
     subprocess.run(["git", "push", "origin", tag], cwd=cwd, check=True, env=env)

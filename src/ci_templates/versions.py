@@ -29,3 +29,18 @@ def next_patch(service: str, version: tuple[int, int, int], cwd: str = ".") -> t
         if suffix.isdigit():
             patches.append(int(suffix))
     return version[0], version[1], max(patches, default=0) + 1
+
+
+def release_tag(service: str, version: tuple[int, int, int], cwd: str = ".") -> str:
+    prefix = f"{service}-v{version[0]}.{version[1]}."
+    result = subprocess.run(
+        ["git", "tag", "--points-at", "HEAD", "--list", f"{prefix}*"],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    patches = [int(tag.removeprefix(prefix)) for tag in result.stdout.splitlines() if tag.removeprefix(prefix).isdigit()]
+    if patches:
+        return service_tag(service, (version[0], version[1], max(patches)))
+    return service_tag(service, next_patch(service, version, cwd=cwd))

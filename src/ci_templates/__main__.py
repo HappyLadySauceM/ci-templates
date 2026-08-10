@@ -14,7 +14,7 @@ from .argocd import wait_application
 from .smoke import run as run_smoke, run_kubernetes
 from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
 from .release import summarize_with_deepseek
-from .versions import next_patch, read_version, service_tag
+from .versions import next_patch, read_version, release_tag, service_tag
 from .charts import ChartError, check_charts, format_result, mirror_charts
 
 
@@ -160,13 +160,12 @@ def main(argv: list[str] | None = None) -> int:
             metadata = json.loads(os.environ.get("CI_RELEASE_METADATA_JSON", "{}"))
             summaries: dict[str, str] = {}
             release_tags: list[tuple[str, str, str]] = []
-            from .versions import read_version, next_patch, service_tag
+            from .versions import read_version, release_tag
             for service in config.services:
                 if service.name not in selected:
                     continue
                 base_version = read_version(service.version_file)
-                release_version = next_patch(service.name, base_version, cwd=args.repo)
-                tag = service_tag(service.name, release_version)
+                tag = release_tag(service.name, base_version, cwd=args.repo)
                 summaries[service.name] = summarize_with_deepseek(config.deepseek_model, service.name, tag, {str(key): str(value) for key, value in metadata.items()})
                 release_tags.append((service.name, tag, summaries[service.name]))
             if not release_tags:
