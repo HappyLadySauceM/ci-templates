@@ -105,6 +105,30 @@ class CiTemplatesTest(unittest.TestCase):
         ])
         self.assertEqual(run.call_args_list[-1].kwargs["env"]["GIT_CONFIG_KEY_0"], "credential.helper")
 
+    @patch("ci_templates.__main__.create_release")
+    @patch("ci_templates.__main__.create_and_push_tag")
+    @patch("ci_templates.__main__.fast_forward_main")
+    @patch("ci_templates.__main__.summarize_with_deepseek", return_value="summary")
+    @patch("ci_templates.__main__.subprocess.run")
+    @patch("ci_templates.__main__.load_config")
+    def test_release_uses_commit_sha_for_github_release(
+        self, load_config_mock, run, summarize, fast_forward, push_tag, create_release_mock
+    ):
+        load_config_mock.return_value = config()
+        run.return_value = subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n")
+
+        from ci_templates.__main__ import main
+
+        with (
+            patch.dict("ci_templates.__main__.os.environ", {"CI_RELEASE_METADATA_JSON": "{}"}, clear=False),
+            patch("ci_templates.versions.read_version", return_value=(1, 2, 3)),
+            patch("ci_templates.versions.next_patch", return_value=(1, 2, 4)),
+            patch("ci_templates.versions.service_tag", return_value="gateway-v1.2.4"),
+        ):
+            self.assertEqual(main(["release", "--services", "gateway"]), 0)
+
+        create_release_mock.assert_called_once_with("org/example", "gateway-v1.2.4", "a" * 40, "summary")
+
 
     def test_update_images(self):
         import tempfile

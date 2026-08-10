@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import os
+import subprocess
 
 from .changes import affected_services, changed_paths
 from .config import ConfigError, load_config
@@ -171,9 +172,16 @@ def main(argv: list[str] | None = None) -> int:
             if not release_tags:
                 raise ConfigError("no affected services selected for release")
             fast_forward_main(cwd=args.repo)
+            target_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=args.repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
             for service_name, tag, summary in release_tags:
                 create_and_push_tag(tag, summary, cwd=args.repo)
-                create_release(config.source_repo, tag, "HEAD", summary)
+                create_release(config.source_repo, tag, target_commit, summary)
             print(json.dumps({"services": [item[0] for item in release_tags], "tags": [item[1] for item in release_tags]}, sort_keys=True))
         elif args.command == "prewarm":
             config = load_config(args.config)
