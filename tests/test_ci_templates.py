@@ -75,20 +75,22 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertTrue(_has_revision({"revisions": [revision, revision]}, revision))
         self.assertFalse(_has_revision({"revisions": ["b" * 40]}, revision))
 
+    @patch.dict("ci_templates.github.os.environ", {"GITHUB_TOKEN": "test-token"}, clear=False)
     @patch("ci_templates.github.subprocess.run")
-    def test_main_promotion_configures_tag_identity(self, run):
+    def test_main_promotion_configures_tag_identity_and_credentials(self, run):
         fast_forward_main(cwd="/workspace")
 
-        self.assertEqual(
-            run.call_args_list,
-            [
-                call(["git", "config", "user.name", "happyladysauce-ci"], cwd="/workspace", check=True),
-                call(["git", "config", "user.email", "happyladysauce-ci@noreply.local"], cwd="/workspace", check=True),
-                call(["git", "fetch", "origin", "main", "dev"], cwd="/workspace", check=True),
-                call(["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd="/workspace", check=True),
-                call(["git", "push", "origin", "HEAD:main"], cwd="/workspace", check=True),
-            ],
-        )
+        self.assertEqual([item.args[0] for item in run.call_args_list], [
+            ["git", "config", "user.name", "happyladysauce-ci"],
+            ["git", "config", "user.email", "happyladysauce-ci@noreply.local"],
+            ["git", "fetch", "origin", "main", "dev"],
+            ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+            ["git", "push", "origin", "HEAD:main"],
+        ])
+        env = run.call_args_list[0].kwargs["env"]
+        self.assertEqual(env["GIT_CONFIG_KEY_0"], "credential.helper")
+        self.assertIn("$GITHUB_TOKEN", env["GIT_CONFIG_VALUE_0"])
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
 
 
     def test_update_images(self):

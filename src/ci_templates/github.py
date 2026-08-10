@@ -40,8 +40,17 @@ def set_commit_status(repository: str, sha: str, state: str, description: str, c
 
 
 def fast_forward_main(cwd: str = ".") -> None:
-    subprocess.run(["git", "config", "user.name", "happyladysauce-ci"], cwd=cwd, check=True)
-    subprocess.run(["git", "config", "user.email", "happyladysauce-ci@noreply.local"], cwd=cwd, check=True)
-    subprocess.run(["git", "fetch", "origin", "main", "dev"], cwd=cwd, check=True)
-    subprocess.run(["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd=cwd, check=True)
-    subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=cwd, check=True)
+    env = os.environ.copy()
+    token = env.get("GITHUB_TOKEN", "")
+    if token:
+        env.update({
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "!f() { printf 'username=x-access-token\\npassword=%s\\n' \"$GITHUB_TOKEN\"; }; f",
+            "GIT_TERMINAL_PROMPT": "0",
+        })
+    subprocess.run(["git", "config", "user.name", "happyladysauce-ci"], cwd=cwd, check=True, env=env)
+    subprocess.run(["git", "config", "user.email", "happyladysauce-ci@noreply.local"], cwd=cwd, check=True, env=env)
+    subprocess.run(["git", "fetch", "origin", "main", "dev"], cwd=cwd, check=True, env=env)
+    subprocess.run(["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd=cwd, check=True, env=env)
+    subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=cwd, check=True, env=env)
