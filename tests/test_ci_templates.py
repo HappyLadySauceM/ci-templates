@@ -16,6 +16,7 @@ from ci_templates.versions import service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
 from ci_templates.build import BuildError, _docker, build_service, image_digest
 from ci_templates.argocd import _has_revision
+from ci_templates.github import fast_forward_main
 
 
 def config() -> Pipeline:
@@ -73,6 +74,21 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertTrue(_has_revision({"revision": revision}, revision))
         self.assertTrue(_has_revision({"revisions": [revision, revision]}, revision))
         self.assertFalse(_has_revision({"revisions": ["b" * 40]}, revision))
+
+    @patch("ci_templates.github.subprocess.run")
+    def test_main_promotion_configures_tag_identity(self, run):
+        fast_forward_main(cwd="/workspace")
+
+        self.assertEqual(
+            run.call_args_list,
+            [
+                call(["git", "config", "user.name", "happyladysauce-ci"], cwd="/workspace", check=True),
+                call(["git", "config", "user.email", "happyladysauce-ci@noreply.local"], cwd="/workspace", check=True),
+                call(["git", "fetch", "origin", "main", "dev"], cwd="/workspace", check=True),
+                call(["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd="/workspace", check=True),
+                call(["git", "push", "origin", "HEAD:main"], cwd="/workspace", check=True),
+            ],
+        )
 
 
     def test_update_images(self):
