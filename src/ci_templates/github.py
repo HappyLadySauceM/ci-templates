@@ -39,7 +39,7 @@ def set_commit_status(repository: str, sha: str, state: str, description: str, c
     return _request("POST", f"/repos/{repository}/statuses/{sha}", {"state": state, "description": description, "context": context, "target_url": target_url or None})
 
 
-def fast_forward_main(cwd: str = ".") -> None:
+def _git_environment() -> dict[str, str]:
     env = os.environ.copy()
     token = env.get("GITHUB_TOKEN", "")
     if token:
@@ -49,8 +49,24 @@ def fast_forward_main(cwd: str = ".") -> None:
             "GIT_CONFIG_VALUE_0": "!f() { printf 'username=x-access-token\\npassword=%s\\n' \"$GITHUB_TOKEN\"; }; f",
             "GIT_TERMINAL_PROMPT": "0",
         })
+    return env
+
+
+def _configure_identity(cwd: str, env: dict[str, str]) -> None:
     subprocess.run(["git", "config", "user.name", "happyladysauce-ci"], cwd=cwd, check=True, env=env)
     subprocess.run(["git", "config", "user.email", "happyladysauce-ci@noreply.local"], cwd=cwd, check=True, env=env)
+
+
+def fast_forward_main(cwd: str = ".") -> None:
+    env = _git_environment()
+    _configure_identity(cwd, env)
     subprocess.run(["git", "fetch", "origin", "main", "dev"], cwd=cwd, check=True, env=env)
     subprocess.run(["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd=cwd, check=True, env=env)
     subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=cwd, check=True, env=env)
+
+
+def create_and_push_tag(tag: str, message: str, cwd: str = ".") -> None:
+    env = _git_environment()
+    _configure_identity(cwd, env)
+    subprocess.run(["git", "tag", "-a", tag, "-m", message, "HEAD"], cwd=cwd, check=True, env=env)
+    subprocess.run(["git", "push", "origin", tag], cwd=cwd, check=True, env=env)

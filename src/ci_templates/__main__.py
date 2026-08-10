@@ -4,7 +4,6 @@ import argparse
 import json
 import sys
 import os
-import subprocess
 
 from .changes import affected_services, changed_paths
 from .config import ConfigError, load_config
@@ -12,7 +11,7 @@ from .gitops import sync_snapshot, promote_snapshot, rollback_snapshot
 from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest
 from .argocd import wait_application
 from .smoke import run as run_smoke, run_kubernetes
-from .github import create_release, fast_forward_main, set_commit_status
+from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
 from .release import summarize_with_deepseek
 from .versions import next_patch, read_version, service_tag
 from .charts import ChartError, check_charts, format_result, mirror_charts
@@ -173,8 +172,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ConfigError("no affected services selected for release")
             fast_forward_main(cwd=args.repo)
             for service_name, tag, summary in release_tags:
-                subprocess.run(["git", "tag", "-a", tag, "-m", summary, "HEAD"], cwd=args.repo, check=True)
-                subprocess.run(["git", "push", "origin", tag], cwd=args.repo, check=True)
+                create_and_push_tag(tag, summary, cwd=args.repo)
                 create_release(config.source_repo, tag, "HEAD", summary)
             print(json.dumps({"services": [item[0] for item in release_tags], "tags": [item[1] for item in release_tags]}, sort_keys=True))
         elif args.command == "prewarm":

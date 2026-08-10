@@ -16,7 +16,7 @@ from ci_templates.versions import service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
 from ci_templates.build import BuildError, _docker, build_service, image_digest
 from ci_templates.argocd import _has_revision
-from ci_templates.github import fast_forward_main
+from ci_templates.github import create_and_push_tag, fast_forward_main
 
 
 def config() -> Pipeline:
@@ -91,6 +91,19 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertEqual(env["GIT_CONFIG_KEY_0"], "credential.helper")
         self.assertIn("$GITHUB_TOKEN", env["GIT_CONFIG_VALUE_0"])
         self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+
+    @patch.dict("ci_templates.github.os.environ", {"GITHUB_TOKEN": "test-token"}, clear=False)
+    @patch("ci_templates.github.subprocess.run")
+    def test_tag_push_uses_the_same_credentials(self, run):
+        create_and_push_tag("gateway-v0.1.1", "summary", cwd="/workspace")
+
+        self.assertEqual([item.args[0] for item in run.call_args_list], [
+            ["git", "config", "user.name", "happyladysauce-ci"],
+            ["git", "config", "user.email", "happyladysauce-ci@noreply.local"],
+            ["git", "tag", "-a", "gateway-v0.1.1", "-m", "summary", "HEAD"],
+            ["git", "push", "origin", "gateway-v0.1.1"],
+        ])
+        self.assertEqual(run.call_args_list[-1].kwargs["env"]["GIT_CONFIG_KEY_0"], "credential.helper")
 
 
     def test_update_images(self):
