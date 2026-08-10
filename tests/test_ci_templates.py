@@ -11,7 +11,7 @@ import unittest
 
 from ci_templates.changes import affected_services
 from ci_templates.config import ConfigError, Pipeline
-from ci_templates.gitops import _git, promote_snapshot, update_images
+from ci_templates.gitops import _git, promote_snapshot, rollback_snapshot, update_images
 from ci_templates.versions import service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
 from ci_templates.build import BuildError, _docker, build_service, image_digest
@@ -125,6 +125,11 @@ class CiTemplatesTest(unittest.TestCase):
             rendered = git("--git-dir", str(remote), "show", f"{revision}:Example/kustomization.yaml").stdout
             self.assertIn(f"digest: {digest}", rendered)
             self.assertNotIn("newTag: old", rendered)
+
+            rollback_revision = rollback_snapshot(str(remote), "main", revision)
+            rolled_back = git("--git-dir", str(remote), "show", f"{rollback_revision}:Example/kustomization.yaml").stdout
+            self.assertIn("newTag: old", rolled_back)
+            self.assertNotIn(f"digest: {digest}", rolled_back)
 
     @patch("ci_templates.build._docker")
     def test_build_preserves_existing_dev_before_replacement(self, docker):
