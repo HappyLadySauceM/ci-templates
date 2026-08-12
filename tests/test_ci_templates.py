@@ -9,9 +9,10 @@ from unittest.mock import call, patch
 
 import unittest
 
-from ci_templates.changes import affected_services, build_release_context, read_release_context
+from ci_templates.changes import affected_services, build_release_context, classify_release_paths, read_release_context
 from ci_templates.config import ConfigError, Pipeline
 from ci_templates.gitops import _git, promote_snapshot, rollback_snapshot, update_images
+from ci_templates.release import render_aggregate_release
 from ci_templates.versions import aggregate_release_tag, service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
 from ci_templates.build import BuildError, _docker, build_jobs, build_service, image_digest
@@ -27,12 +28,45 @@ def config() -> Pipeline:
         "gitops_path": "Example",
         "gitops_branch": "main",
         "shared_paths": ["pkg", "idl"],
+        "aggregate_release_prefix": "example",
+        "aggregate_version_file": "VERSION",
         "base_images": [{"source": "example/base:source", "destination": "example/base:cached"}],
         "services": [{
             "name": "gateway", "source_path": "services/gateway", "version_file": "services/gateway/VERSION",
             "dockerfile": "services/gateway/Dockerfile", "context": ".", "image_repository": "org/gateway",
             "deploy_snapshot": "deploy/gateway",
         }],
+    })
+
+
+def multi_service_config() -> Pipeline:
+    return Pipeline.from_mapping({
+        "project": "Knowledge-Core",
+        "source_repo": "org/example",
+        "gitops_repo": "org/gitops",
+        "gitops_path": "Example",
+        "gitops_branch": "main",
+        "shared_paths": ["pkg", "Makefile"],
+        "aggregate_release_prefix": "knowledge-core",
+        "aggregate_version_file": "VERSION",
+        "base_images": [{"source": "example/base:source", "destination": "example/base:cached"}],
+        "services": [
+            {
+                "name": "gateway", "source_path": "services/gateway", "version_file": "services/gateway/VERSION",
+                "dockerfile": "docker/gateway/Dockerfile", "context": ".", "image_repository": "org/gateway",
+                "deploy_snapshot": "deploy/gateway",
+            },
+            {
+                "name": "identity", "source_path": "services/identity", "version_file": "services/identity/VERSION",
+                "dockerfile": "docker/identity/Dockerfile", "context": ".", "image_repository": "org/identity",
+                "deploy_snapshot": "deploy/identity",
+            },
+            {
+                "name": "knowledge", "source_path": "services/knowledge", "version_file": "services/knowledge/VERSION",
+                "dockerfile": "docker/knowledge/Dockerfile", "context": ".", "image_repository": "org/knowledge",
+                "deploy_snapshot": "deploy/knowledge",
+            },
+        ],
     })
 
 
@@ -116,10 +150,63 @@ class CiTemplatesTest(unittest.TestCase):
             diff = context["services"]["gateway"]["diff"]
             self.assertGreaterEqual(diff.count("[REDACTED SENSITIVE VALUE]"), 2)
             self.assertNotIn("second@db", diff)
+            self.assertEqual(context["shared"]["paths"], [])
 
             context_path = root / "release.json"
             context_path.write_text(json.dumps(context), encoding="utf-8")
             self.assertEqual(read_release_context(context_path)["base"], "HEAD^")
+
+    def test_classify_makefile_and_dockerfiles_as_shared_only(self):
+        shared, exclusive = classify_release_paths(
+            multi_service_config(),
+            ["Makefile", "docker/gateway/Dockerfile", "docker/identity/Dockerfile", "docker/knowledge/Dockerfile"],
+        )
+        self.assertEqual(
+            shared,
+            ["Makefile", "docker/gateway/Dockerfile", "docker/identity/Dockerfile", "docker/knowledge/Dockerfile"],
+        )
+        self.assertEqual(exclusive, {})
+
+    def test_classify_keeps_service_business_paths_exclusive(self):
+        shared, exclusive = classify_release_paths(
+            multi_service_config(),
+            ["Makefile", "services/knowledge/internal/worker/worker.go"],
+        )
+        self.assertEqual(shared, ["Makefile"])
+        self.assertEqual(exclusive, {"knowledge": ["services/knowledge/internal/worker/worker.go"]})
+
+    def test_render_aggregate_release_omits_empty_sections(self):
+        body = render_aggregate_release(
+            "Knowledge-Core",
+            "knowledge-core-v0.1.6",
+            "- Cap BUILD_JOBS at three quarters of host CPUs.",
+            [],
+            ["gateway", "identity", "knowledge"],
+        )
+        self.assertEqual(
+            body,
+            "# Knowledge-Core knowledge-core-v0.1.6\n"
+            "\n"
+            "## Shared changes\n"
+            "\n"
+            "- Cap BUILD_JOBS at three quarters of host CPUs.\n"
+            "\n"
+            "## Deployed services\n"
+            "\n"
+            "- gateway\n"
+            "- identity\n"
+            "- knowledge\n",
+        )
+        body = render_aggregate_release(
+            "Knowledge-Core",
+            "knowledge-core-v0.1.7",
+            "",
+            [("knowledge", "- Wake workers with PostgreSQL NOTIFY.")],
+            ["knowledge"],
+        )
+        self.assertIn("## Service-specific changes\n\n### knowledge\n", body)
+        self.assertNotIn("## Shared changes", body)
+        self.assertNotIn("Service versions", body)
 
     def test_argo_revision_supports_single_and_multi_source_applications(self):
         revision = "a" * 40
@@ -176,19 +263,77 @@ class CiTemplatesTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             changes_file = Path(directory) / "changes.json"
-            changes_file.write_text(json.dumps({"services": {"gateway": {"paths": ["services/gateway/a.go"], "diff": "+ feature"}}}), encoding="utf-8")
+            changes_file.write_text(
+                json.dumps({
+                    "shared": {"paths": [], "diff": ""},
+                    "services": {"gateway": {"paths": ["services/gateway/a.go"], "diff": "+ feature"}},
+                }),
+                encoding="utf-8",
+            )
             with (
                 patch.dict("ci_templates.__main__.os.environ", {}, clear=False),
                 patch("ci_templates.__main__.read_version", return_value=(1, 2, 3)),
-                patch("ci_templates.versions.next_patch", return_value=(1, 2, 4)),
-                patch("ci_templates.versions.service_tag", return_value="gateway-v1.2.4"),
+                patch("ci_templates.__main__.aggregate_release_tag", return_value="example-v1.2.1"),
             ):
                 self.assertEqual(main(["release", "--services", "gateway", "--changes-file", str(changes_file)]), 0)
 
+        push_tag.assert_called_once_with("example-v1.2.1", "example release example-v1.2.1", cwd=".")
         create_release_mock.assert_called_once_with(
-            "org/example", "example-v1.2.1", "a" * 40, "# example example-v1.2.1\n\n## Functional changes\n\n### gateway · `gateway-v1.2.4`\n\nsummary\n\n## Service versions\n\n- gateway: `gateway-v1.2.4`\n",
+            "org/example",
+            "example-v1.2.1",
+            "a" * 40,
+            "# example example-v1.2.1\n\n## Service-specific changes\n\n### gateway\n\nsummary\n\n## Deployed services\n\n- gateway\n",
             name="example example-v1.2.1",
         )
+        summarize.assert_called_once()
+        self.assertFalse(summarize.call_args.kwargs.get("shared"))
+
+    @patch("ci_templates.__main__.create_release")
+    @patch("ci_templates.__main__.create_and_push_tag")
+    @patch("ci_templates.__main__.fast_forward_main")
+    @patch("ci_templates.__main__.summarize_with_deepseek", return_value="- shared summary")
+    @patch("ci_templates.__main__.subprocess.run")
+    @patch("ci_templates.__main__.load_config")
+    def test_release_shared_only_skips_service_sections(
+        self, load_config_mock, run, summarize, fast_forward, push_tag, create_release_mock
+    ):
+        load_config_mock.return_value = multi_service_config()
+        run.return_value = subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n")
+
+        from ci_templates.__main__ import main
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            changes_file = Path(directory) / "changes.json"
+            changes_file.write_text(
+                json.dumps({
+                    "shared": {"paths": ["Makefile", "docker/gateway/Dockerfile"], "diff": "+ BUILD_JOBS"},
+                    "services": {},
+                }),
+                encoding="utf-8",
+            )
+            with (
+                patch.dict("ci_templates.__main__.os.environ", {}, clear=False),
+                patch("ci_templates.__main__.read_version", return_value=(0, 1, 5)),
+                patch("ci_templates.__main__.aggregate_release_tag", return_value="knowledge-core-v0.1.6"),
+            ):
+                self.assertEqual(
+                    main(["release", "--services", "gateway,identity,knowledge", "--changes-file", str(changes_file)]),
+                    0,
+                )
+
+        push_tag.assert_called_once_with(
+            "knowledge-core-v0.1.6",
+            "Knowledge-Core release knowledge-core-v0.1.6",
+            cwd=".",
+        )
+        body = create_release_mock.call_args.args[3]
+        self.assertIn("## Shared changes", body)
+        self.assertNotIn("## Service-specific changes", body)
+        self.assertIn("- gateway\n- identity\n- knowledge\n", body)
+        summarize.assert_called_once()
+        self.assertTrue(summarize.call_args.kwargs.get("shared"))
 
 
     def test_update_images(self):

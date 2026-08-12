@@ -13,31 +13,59 @@ class ReleaseError(RuntimeError):
 def render_aggregate_release(
     project: str,
     aggregate_tag: str,
-    entries: list[tuple[str, str, str]],
+    shared_summary: str,
+    service_entries: list[tuple[str, str]],
+    deployed_services: list[str],
 ) -> str:
-    sections = [f"# {project} {aggregate_tag}", "", "## Functional changes", ""]
-    for service, tag, summary in entries:
-        sections.extend([f"### {service} · `{tag}`", "", summary.strip(), ""])
-    sections.extend(["## Service versions", ""])
-    sections.extend(f"- {service}: `{tag}`" for service, tag, _ in entries)
+    sections = [f"# {project} {aggregate_tag}", ""]
+    shared = shared_summary.strip()
+    if shared:
+        sections.extend(["## Shared changes", "", shared, ""])
+    if service_entries:
+        sections.extend(["## Service-specific changes", ""])
+        for service, summary in service_entries:
+            sections.extend([f"### {service}", "", summary.strip(), ""])
+    sections.extend(["## Deployed services", ""])
+    sections.extend(f"- {service}" for service in deployed_services)
     return "\n".join(sections).rstrip() + "\n"
 
 
-def summarize_with_deepseek(model: str, service: str, version: str, changes: dict, language: str = "en") -> str:
+def summarize_with_deepseek(
+    model: str,
+    service: str,
+    version: str,
+    changes: dict,
+    language: str = "en",
+    *,
+    shared: bool = False,
+) -> str:
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
     endpoint = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/chat/completions")
     if not api_key:
         raise ReleaseError("DEEPSEEK_API_KEY is required before main promotion")
+    if shared:
+        instruction = (
+            f"Write a concise functional change summary in {language} for cross-service shared, "
+            "CI/CD, build, or platform changes. Use only the supplied changed paths and diff. "
+            "Describe the change once for the whole project; do not attribute the same change to "
+            "individual services. Describe user-visible behavior, API, configuration, or operational "
+            "changes when evidenced. Do not mention commit hashes, branches, workflows, authors, or "
+            "release metadata. Never invent details. Return Markdown bullets only."
+        )
+    else:
+        instruction = (
+            f"Write a concise functional change summary in {language} for this service only. "
+            "Use only the supplied changed paths and diff. Describe user-visible behavior, API, "
+            "configuration, or operational changes when evidenced. Do not mention commit hashes, "
+            "branches, workflows, authors, or release metadata. Never invent details. "
+            "Return Markdown bullets only."
+        )
     prompt = {
         "service": service,
         "version": version,
         "changes": changes,
-        "instruction": (
-            f"Write a concise functional change summary in {language}. Use only the supplied changed paths and diff. "
-            "Describe user-visible behavior, API, configuration, or operational changes when evidenced. "
-            "Do not mention commit hashes, branches, workflows, authors, or release metadata. Never invent details. "
-            "Return Markdown bullets only."
-        ),
+        "scope": "shared" if shared else "service",
+        "instruction": instruction,
     }
     finish_reason = "unknown"
     for max_tokens in (4096, 8192):

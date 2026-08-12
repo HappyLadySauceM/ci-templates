@@ -15,7 +15,7 @@ from .argocd import wait_application
 from .smoke import run as run_smoke, run_kubernetes
 from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
 from .release import render_aggregate_release, summarize_with_deepseek
-from .versions import aggregate_release_tag, next_patch, read_version, release_tag, service_tag
+from .versions import aggregate_release_tag, next_patch, read_version, service_tag
 from .charts import ChartError, check_charts, format_result, mirror_charts
 
 
@@ -167,6 +167,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "release":
             config = load_config(args.config)
             selected = {item.strip() for item in args.services.split(",") if item.strip()}
+            deployed = [service.name for service in config.services if service.name in selected]
+            if not deployed:
+                raise ConfigError("no affected services selected for release")
             changes_file = args.changes_file or os.environ.get("CI_RELEASE_CHANGES_FILE", "")
             if not changes_file:
                 raise ConfigError("CI_RELEASE_CHANGES_FILE or --changes-file is required before main promotion")
@@ -181,29 +184,43 @@ def main(argv: list[str] | None = None) -> int:
             context_head = context.get("head")
             if context_head and context_head != current_commit:
                 raise ConfigError("release change context does not match the checked-out commit")
-            summaries: dict[str, str] = {}
-            release_tags: list[tuple[str, str, str]] = []
+            aggregate_version = read_version(Path(args.repo) / config.aggregate_version_file)
+            aggregate_tag = aggregate_release_tag(config.aggregate_release_prefix, aggregate_version, cwd=args.repo)
+            shared_changes = context.get("shared")
+            shared_summary = ""
+            if isinstance(shared_changes, dict) and (shared_changes.get("paths") or shared_changes.get("diff")):
+                shared_summary = summarize_with_deepseek(
+                    config.deepseek_model,
+                    config.aggregate_release_prefix,
+                    aggregate_tag,
+                    shared_changes,
+                    config.release_language,
+                    shared=True,
+                )
+            service_entries: list[tuple[str, str]] = []
             for service in config.services:
-                if service.name not in selected:
-                    continue
-                base_version = read_version(Path(args.repo) / service.version_file)
-                tag = release_tag(service.name, base_version, cwd=args.repo)
                 service_changes = context.get("services", {}).get(service.name)
                 if not isinstance(service_changes, dict):
-                    raise ConfigError(f"release change context is missing service {service.name}")
-                summaries[service.name] = summarize_with_deepseek(
+                    continue
+                if not (service_changes.get("paths") or service_changes.get("diff")):
+                    continue
+                summary = summarize_with_deepseek(
                     config.deepseek_model,
                     service.name,
-                    tag,
+                    aggregate_tag,
                     service_changes,
                     config.release_language,
                 )
-                release_tags.append((service.name, tag, summaries[service.name]))
-            if not release_tags:
-                raise ConfigError("no affected services selected for release")
-            aggregate_version = read_version(Path(args.repo) / config.aggregate_version_file)
-            aggregate_tag = aggregate_release_tag(config.aggregate_release_prefix, aggregate_version, cwd=args.repo)
-            release_body = render_aggregate_release(config.project, aggregate_tag, release_tags)
+                service_entries.append((service.name, summary))
+            if not shared_summary and not service_entries:
+                raise ConfigError("release change context has no shared or service-specific changes")
+            release_body = render_aggregate_release(
+                config.project,
+                aggregate_tag,
+                shared_summary,
+                service_entries,
+                deployed,
+            )
             fast_forward_main(cwd=args.repo)
             target_commit = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
@@ -212,8 +229,6 @@ def main(argv: list[str] | None = None) -> int:
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-            for service_name, tag, summary in release_tags:
-                create_and_push_tag(tag, f"{config.project} service release {tag}", cwd=args.repo)
             create_and_push_tag(aggregate_tag, f"{config.project} release {aggregate_tag}", cwd=args.repo)
             create_release(
                 config.source_repo,
@@ -222,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
                 release_body,
                 name=f"{config.project} {aggregate_tag}",
             )
-            print(json.dumps({"services": [item[0] for item in release_tags], "tags": [item[1] for item in release_tags], "release": aggregate_tag}, sort_keys=True))
+            print(json.dumps({"deployed": deployed, "release": aggregate_tag}, sort_keys=True))
         elif args.command == "prewarm":
             config = load_config(args.config)
             prewarm_base_images(config.base_images, cwd=args.repo)

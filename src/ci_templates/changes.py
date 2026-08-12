@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from .config import Pipeline
+from .config import Pipeline, Service
 
 
 MAX_CONTEXT_BYTES = 64 * 1024
@@ -70,30 +70,71 @@ def _truncate(value: str, limit: int = MAX_CONTEXT_BYTES) -> str:
     return encoded[:limit].decode("utf-8", errors="ignore") + "\n[DIFF TRUNCATED]"
 
 
-def _service_paths(pipeline: Pipeline, service_name: str, paths: Iterable[str]) -> list[str]:
-    service = next(item for item in pipeline.services if item.name == service_name)
-    service_prefixes = (service.source_path.rstrip("/") + "/", service.deploy_snapshot.rstrip("/") + "/")
-    shared = tuple(path.rstrip("/") for path in pipeline.shared_paths)
-    return [
-        path for path in paths
-        if path in {service.source_path, service.dockerfile}
-        or path.startswith(service_prefixes)
-        or any(path == prefix or path.startswith(prefix + "/") for prefix in shared)
-    ]
+def _shared_prefixes(pipeline: Pipeline) -> tuple[str, ...]:
+    return tuple(path.rstrip("/") for path in pipeline.shared_paths)
+
+
+def _is_under_prefix(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def _is_configured_shared_path(pipeline: Pipeline, path: str) -> bool:
+    return any(_is_under_prefix(path, prefix) for prefix in _shared_prefixes(pipeline))
+
+
+def _service_business_match(service: Service, path: str) -> bool:
+    source = service.source_path.rstrip("/")
+    deploy = service.deploy_snapshot.rstrip("/")
+    return path in {service.source_path, service.deploy_snapshot} or _is_under_prefix(path, source) or _is_under_prefix(path, deploy)
+
+
+def _bucket_diff(base: str, head: str, paths: list[str], cwd: str) -> dict[str, Any]:
+    limited = paths[:MAX_CONTEXT_PATHS]
+    diff = "\n".join(_redact_diff(path, _diff(base, head, [path], cwd)) for path in limited)
+    return {"paths": limited, "diff": _truncate(diff)}
+
+
+def classify_release_paths(pipeline: Pipeline, paths: Iterable[str]) -> tuple[list[str], dict[str, list[str]]]:
+    """Split changed paths into shared/CI versus service-business buckets.
+
+    将变更路径划分为共享/CI 桶与服务业务桶。
+    Dockerfile-only rebuilds without services/<svc> or deploy/<svc> changes stay shared.
+    仅 Dockerfile、无业务代码变更时归入共享桶。
+    """
+    shared: list[str] = []
+    exclusive: dict[str, list[str]] = {service.name: [] for service in pipeline.services}
+    for path in paths:
+        if _is_configured_shared_path(pipeline, path):
+            shared.append(path)
+            continue
+        business_owner: str | None = None
+        for service in pipeline.services:
+            if _service_business_match(service, path):
+                business_owner = service.name
+                break
+        if business_owner is not None:
+            exclusive[business_owner].append(path)
+            continue
+        # Dockerfile-only and other non-business paths are shared release notes.
+        # 仅 Dockerfile 及其他非业务路径写入共享发布说明。
+        shared.append(path)
+    return shared, {name: values for name, values in exclusive.items() if values}
 
 
 def build_release_context(pipeline: Pipeline, base: str, head: str, paths: Iterable[str], cwd: str = ".") -> dict[str, Any]:
-    paths = tuple(paths)
-    selected = affected_services(pipeline, paths)
-    services: dict[str, dict[str, Any]] = {}
-    for service_name in selected:
-        service_paths = _service_paths(pipeline, service_name, paths)[:MAX_CONTEXT_PATHS]
-        diff = "\n".join(_redact_diff(path, _diff(base, head, [path], cwd)) for path in service_paths)
-        services[service_name] = {
-            "paths": service_paths,
-            "diff": _truncate(diff),
-        }
-    return {"base": base, "head": head, "paths": list(paths), "services": services}
+    paths = list(paths)
+    shared_paths, exclusive = classify_release_paths(pipeline, paths)
+    services = {
+        name: _bucket_diff(base, head, service_paths, cwd)
+        for name, service_paths in exclusive.items()
+    }
+    return {
+        "base": base,
+        "head": head,
+        "paths": paths,
+        "shared": _bucket_diff(base, head, shared_paths, cwd),
+        "services": services,
+    }
 
 
 def write_release_context(path: str | Path, context: dict[str, Any]) -> None:
@@ -109,6 +150,11 @@ def read_release_context(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"cannot read release change context {path}: {exc}") from exc
     if not isinstance(context, dict) or not isinstance(context.get("services"), dict):
         raise ValueError("release change context must contain a services object")
+    shared = context.get("shared")
+    if shared is None:
+        context["shared"] = {"paths": [], "diff": ""}
+    elif not isinstance(shared, dict):
+        raise ValueError("release change context shared bucket must be an object")
     return context
 
 
@@ -121,7 +167,7 @@ def affected_services(pipeline: Pipeline, paths: Iterable[str]) -> tuple[str, ..
         prefixes = (service.source_path.rstrip("/") + "/", service.deploy_snapshot.rstrip("/") + "/")
         if any(path in {service.source_path, service.dockerfile} or path.startswith(prefixes) for path in paths):
             affected.add(service.name)
-    shared = tuple(path.rstrip("/") for path in pipeline.shared_paths)
-    if any(path == prefix or path.startswith(prefix + "/") for path in paths for prefix in shared):
+    shared = _shared_prefixes(pipeline)
+    if any(_is_under_prefix(path, prefix) for path in paths for prefix in shared):
         affected.update(service.name for service in pipeline.services)
     return tuple(service.name for service in pipeline.services if service.name in affected)
