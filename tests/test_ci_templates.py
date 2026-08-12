@@ -14,7 +14,7 @@ from ci_templates.config import ConfigError, Pipeline
 from ci_templates.gitops import _git, promote_snapshot, rollback_snapshot, update_images
 from ci_templates.versions import aggregate_release_tag, service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
-from ci_templates.build import BuildError, _docker, build_service, image_digest
+from ci_templates.build import BuildError, _docker, build_jobs, build_service, image_digest
 from ci_templates.argocd import _has_revision
 from ci_templates.github import create_and_push_tag, fast_forward_main
 
@@ -250,12 +250,11 @@ class CiTemplatesTest(unittest.TestCase):
     @patch("ci_templates.build._docker")
     def test_build_preserves_existing_dev_before_replacement(self, docker):
         docker.side_effect = [
-            subprocess.CompletedProcess([], 0),
-            subprocess.CompletedProcess([], 0),
-            subprocess.CompletedProcess([], 0),
-            subprocess.CompletedProcess([], 0),
-            subprocess.CompletedProcess([], 0),
-            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0),  # pull
+            subprocess.CompletedProcess([], 0),  # tag
+            subprocess.CompletedProcess([], 0),  # push previous
+            subprocess.CompletedProcess([], 0),  # buildx inspect (exists)
+            subprocess.CompletedProcess([], 0),  # buildx build
         ]
 
         build_service(config().services[0])
@@ -268,44 +267,43 @@ class CiTemplatesTest(unittest.TestCase):
                 call(["push", "org/gateway:previous"], cwd="."),
             ],
         )
-        builder = docker.call_args_list[3].args[0][-1]
         self.assertEqual(
-            docker.call_args_list[3].args[0][:4],
-            ["buildx", "create", "--driver", "docker-container"],
+            docker.call_args_list[3],
+            call(["buildx", "inspect", "ci-templates"], cwd=".", check=False),
         )
-        self.assertEqual(docker.call_args_list[4].args[0][:4], ["buildx", "build", "--builder", builder])
-        self.assertEqual(docker.call_args_list[5], call(["buildx", "rm", "--force", builder], cwd=".", check=False))
+        build_args = docker.call_args_list[4].args[0]
+        self.assertEqual(build_args[:4], ["buildx", "build", "--builder", "ci-templates"])
+        self.assertIn("--build-arg", build_args)
+        self.assertIn(f"BUILD_JOBS={build_jobs()}", build_args)
+        self.assertFalse(any(args.args[0][:2] == ["buildx", "rm"] for args in docker.call_args_list))
 
     @patch("ci_templates.build._docker")
     def test_first_build_does_not_require_previous_image(self, docker):
         docker.side_effect = [
-            subprocess.CompletedProcess([], 1),
-            subprocess.CompletedProcess([], 0),
-            subprocess.CompletedProcess([], 0),
-            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 1),  # pull miss
+            subprocess.CompletedProcess([], 0),  # inspect exists
+            subprocess.CompletedProcess([], 0),  # build
         ]
 
         build_service(config().services[0])
 
-        self.assertEqual(docker.call_count, 4)
-        builder = docker.call_args_list[1].args[0][-1]
-        self.assertEqual(docker.call_args_list[2].args[0][:4], ["buildx", "build", "--builder", builder])
-        self.assertIn("--push", docker.call_args_list[2].args[0])
+        self.assertEqual(docker.call_count, 3)
+        build_args = docker.call_args_list[2].args[0]
+        self.assertEqual(build_args[:4], ["buildx", "build", "--builder", "ci-templates"])
+        self.assertIn("--push", build_args)
 
     @patch("ci_templates.build._docker")
-    def test_failed_build_removes_temporary_builder(self, docker):
+    def test_failed_build_keeps_stable_builder(self, docker):
         docker.side_effect = [
-            subprocess.CompletedProcess([], 1),
-            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 1),  # pull miss
+            subprocess.CompletedProcess([], 0),  # inspect exists
             subprocess.CalledProcessError(1, ["docker", "buildx", "build"]),
-            subprocess.CompletedProcess([], 0),
         ]
 
         with self.assertRaises(BuildError):
             build_service(config().services[0])
 
-        builder = docker.call_args_list[1].args[0][-1]
-        self.assertEqual(docker.call_args_list[-1], call(["buildx", "rm", "--force", builder], cwd=".", check=False))
+        self.assertFalse(any(args.args[0][:2] == ["buildx", "rm"] for args in docker.call_args_list))
 
     @patch("ci_templates.build._docker")
     def test_build_configures_private_registry_ca(self, docker):
@@ -313,6 +311,8 @@ class CiTemplatesTest(unittest.TestCase):
         observed = []
 
         def run(args, **_kwargs):
+            if args[:2] == ["buildx", "inspect"]:
+                return subprocess.CompletedProcess([], 1)
             if args[:2] == ["buildx", "create"]:
                 config_path = Path(args[args.index("--buildkitd-config") + 1])
                 observed.append(config_path.read_text(encoding="utf-8"))
@@ -325,7 +325,18 @@ class CiTemplatesTest(unittest.TestCase):
             with patch.dict("os.environ", {"CI_REGISTRY_CA_FILE": str(ca_path)}):
                 build_service(config().services[0])
 
-        self.assertEqual(observed, [f'[registry."org"]\n  ca = ["{ca_path}"]\n'])
+        self.assertEqual(len(observed), 1)
+        self.assertIn("[worker.oci]", observed[0])
+        self.assertIn(f"max-parallelism = {build_jobs()}", observed[0])
+        self.assertIn(f'[registry."org"]\n  ca = ["{ca_path}"]\n', observed[0])
+
+    def test_build_jobs_uses_three_quarters_of_cpus(self):
+        with patch("ci_templates.build.os.cpu_count", return_value=8):
+            self.assertEqual(build_jobs(), 6)
+        with patch("ci_templates.build.os.cpu_count", return_value=1):
+            self.assertEqual(build_jobs(), 1)
+        with patch("ci_templates.build.os.cpu_count", return_value=None):
+            self.assertEqual(build_jobs(), 1)
 
     @patch("ci_templates.build.subprocess.run")
     def test_image_digest_accepts_legacy_buildx_output(self, run):
