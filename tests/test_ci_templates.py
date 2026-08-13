@@ -118,11 +118,31 @@ class CiTemplatesTest(unittest.TestCase):
             subprocess.run(["git", "-C", str(root), "add", "VERSION"], check=True)
             subprocess.run(["git", "-C", str(root), "commit", "-qm", "init"], check=True)
             subprocess.run(["git", "-C", str(root), "tag", "knowledge-core-v0.1.1"], check=True)
-            self.assertEqual(aggregate_release_tag("knowledge-core", (0, 1, 0), cwd=str(root)), "knowledge-core-v0.1.1")
+            subprocess.run(["git", "-C", str(root), "tag", "v0.1.0"], check=True)
+            self.assertEqual(aggregate_release_tag("knowledge-core", (0, 1, 0), cwd=str(root)), "v0.1.0")
             (root / "VERSION").write_text("0.1\nchanged\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(root), "add", "VERSION"], check=True)
             subprocess.run(["git", "-C", str(root), "commit", "-qm", "change"], check=True)
-            self.assertEqual(aggregate_release_tag("knowledge-core", (0, 1, 0), cwd=str(root)), "knowledge-core-v0.1.2")
+            self.assertEqual(aggregate_release_tag("knowledge-core", (0, 1, 0), cwd=str(root)), "v0.1.2")
+            (root / "VERSION").write_text("0.1\nagain\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "VERSION"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "again"], check=True)
+            subprocess.run(["git", "-C", str(root), "tag", "v0.1.2"], check=True)
+            self.assertEqual(aggregate_release_tag("knowledge-core", (0, 1, 0), cwd=str(root)), "v0.1.2")
+
+    def test_aggregate_release_tag_reuses_legacy_prefix_tag_on_head(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "test"], check=True)
+            (root / "VERSION").write_text("0.1\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "VERSION"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "init"], check=True)
+            subprocess.run(["git", "-C", str(root), "tag", "knowledge-core-v0.1.7"], check=True)
+            self.assertEqual(aggregate_release_tag("knowledge-core", (0, 1, 0), cwd=str(root)), "knowledge-core-v0.1.7")
 
     def test_release_context_redacts_sensitive_values(self):
         import tempfile
@@ -177,15 +197,14 @@ class CiTemplatesTest(unittest.TestCase):
 
     def test_render_aggregate_release_omits_empty_sections(self):
         body = render_aggregate_release(
-            "Knowledge-Core",
-            "knowledge-core-v0.1.6",
+            "v0.1.6",
             "- Cap BUILD_JOBS at three quarters of host CPUs.",
             [],
             ["gateway", "identity", "knowledge"],
         )
         self.assertEqual(
             body,
-            "# Knowledge-Core knowledge-core-v0.1.6\n"
+            "# v0.1.6\n"
             "\n"
             "## Shared changes\n"
             "\n"
@@ -198,8 +217,7 @@ class CiTemplatesTest(unittest.TestCase):
             "- knowledge\n",
         )
         body = render_aggregate_release(
-            "Knowledge-Core",
-            "knowledge-core-v0.1.7",
+            "v0.1.7",
             "",
             [("knowledge", "- Wake workers with PostgreSQL NOTIFY.")],
             ["knowledge"],
@@ -273,17 +291,17 @@ class CiTemplatesTest(unittest.TestCase):
             with (
                 patch.dict("ci_templates.__main__.os.environ", {}, clear=False),
                 patch("ci_templates.__main__.read_version", return_value=(1, 2, 3)),
-                patch("ci_templates.__main__.aggregate_release_tag", return_value="example-v1.2.1"),
+                patch("ci_templates.__main__.aggregate_release_tag", return_value="v1.2.1"),
             ):
                 self.assertEqual(main(["release", "--services", "gateway", "--changes-file", str(changes_file)]), 0)
 
-        push_tag.assert_called_once_with("example-v1.2.1", "example release example-v1.2.1", cwd=".")
+        push_tag.assert_called_once_with("v1.2.1", "v1.2.1", cwd=".")
         create_release_mock.assert_called_once_with(
             "org/example",
-            "example-v1.2.1",
+            "v1.2.1",
             "a" * 40,
-            "# example example-v1.2.1\n\n## Service-specific changes\n\n### gateway\n\nsummary\n\n## Deployed services\n\n- gateway\n",
-            name="example example-v1.2.1",
+            "# v1.2.1\n\n## Service-specific changes\n\n### gateway\n\nsummary\n\n## Deployed services\n\n- gateway\n",
+            name="v1.2.1",
         )
         summarize.assert_called_once()
         self.assertFalse(summarize.call_args.kwargs.get("shared"))
@@ -316,7 +334,7 @@ class CiTemplatesTest(unittest.TestCase):
             with (
                 patch.dict("ci_templates.__main__.os.environ", {}, clear=False),
                 patch("ci_templates.__main__.read_version", return_value=(0, 1, 5)),
-                patch("ci_templates.__main__.aggregate_release_tag", return_value="knowledge-core-v0.1.6"),
+                patch("ci_templates.__main__.aggregate_release_tag", return_value="v0.1.6"),
             ):
                 self.assertEqual(
                     main(["release", "--services", "gateway,identity,knowledge", "--changes-file", str(changes_file)]),
@@ -324,8 +342,8 @@ class CiTemplatesTest(unittest.TestCase):
                 )
 
         push_tag.assert_called_once_with(
-            "knowledge-core-v0.1.6",
-            "Knowledge-Core release knowledge-core-v0.1.6",
+            "v0.1.6",
+            "v0.1.6",
             cwd=".",
         )
         body = create_release_mock.call_args.args[3]

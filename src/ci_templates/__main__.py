@@ -215,7 +215,6 @@ def main(argv: list[str] | None = None) -> int:
             if not shared_summary and not service_entries:
                 raise ConfigError("release change context has no shared or service-specific changes")
             release_body = render_aggregate_release(
-                config.project,
                 aggregate_tag,
                 shared_summary,
                 service_entries,
@@ -229,13 +228,13 @@ def main(argv: list[str] | None = None) -> int:
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-            create_and_push_tag(aggregate_tag, f"{config.project} release {aggregate_tag}", cwd=args.repo)
+            create_and_push_tag(aggregate_tag, aggregate_tag, cwd=args.repo)
             create_release(
                 config.source_repo,
                 aggregate_tag,
                 target_commit,
                 release_body,
-                name=f"{config.project} {aggregate_tag}",
+                name=aggregate_tag,
             )
             print(json.dumps({"deployed": deployed, "release": aggregate_tag}, sort_keys=True))
         elif args.command == "prewarm":

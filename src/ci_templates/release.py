@@ -11,13 +11,12 @@ class ReleaseError(RuntimeError):
 
 
 def render_aggregate_release(
-    project: str,
     aggregate_tag: str,
     shared_summary: str,
     service_entries: list[tuple[str, str]],
     deployed_services: list[str],
 ) -> str:
-    sections = [f"# {project} {aggregate_tag}", ""]
+    sections = [f"# {aggregate_tag}", ""]
     shared = shared_summary.strip()
     if shared:
         sections.extend(["## Shared changes", "", shared, ""])
