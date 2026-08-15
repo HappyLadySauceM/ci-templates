@@ -16,7 +16,7 @@ from ci_templates.release import render_aggregate_release
 from ci_templates.versions import aggregate_release_tag, service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
 from ci_templates.build import BuildError, _docker, build_jobs, build_service, image_digest
-from ci_templates.argocd import _has_revision
+from ci_templates.argocd import ArgoError, _has_revision, _observed_revisions, _ready_state, wait_application
 from ci_templates.github import create_and_push_tag, fast_forward_main
 
 
@@ -231,6 +231,78 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertTrue(_has_revision({"revision": revision}, revision))
         self.assertTrue(_has_revision({"revisions": [revision, revision]}, revision))
         self.assertFalse(_has_revision({"revisions": ["b" * 40]}, revision))
+
+    def test_argo_ready_accepts_history_revision_when_sync_sha_lags(self):
+        desired = "a" * 40
+        previous = "b" * 40
+        payload = {
+            "status": {
+                "sync": {"revision": previous, "status": "Synced"},
+                "health": {"status": "Healthy"},
+                "history": [{"revision": desired}],
+            }
+        }
+        self.assertIn(desired, _observed_revisions(payload))
+        ready, _ = _ready_state(payload, desired)
+        self.assertTrue(ready)
+
+    @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
+    @patch("ci_templates.argocd.time.sleep", return_value=None)
+    @patch("ci_templates.argocd.subprocess.run")
+    def test_argo_wait_refreshes_and_accepts_updated_revision(self, run, _sleep):
+        desired = "a" * 40
+        stale = json.dumps({
+            "status": {
+                "sync": {"revision": "b" * 40, "status": "Synced"},
+                "health": {"status": "Healthy"},
+            }
+        })
+        current = json.dumps({
+            "status": {
+                "sync": {"revision": desired, "status": "Synced"},
+                "health": {"status": "Healthy"},
+            }
+        })
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, stale, ""),
+            subprocess.CompletedProcess([], 0, current, ""),
+        ]
+
+        payload = wait_application("argocd.example.invalid", "knowledge-core-gateway-dev", desired, timeout=30)
+
+        self.assertEqual(payload["status"]["sync"]["revision"], desired)
+        commands = [list(item.args[0]) for item in run.call_args_list]
+        self.assertTrue(any("annotate" in command for command in commands), commands)
+        self.assertTrue(
+            any("argocd.argoproj.io/refresh=hard" in command for command in commands),
+            commands,
+        )
+
+    @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
+    @patch("ci_templates.argocd.time.sleep", return_value=None)
+    @patch("ci_templates.argocd.subprocess.run")
+    def test_argo_wait_times_out_when_healthy_at_another_revision(self, run, _sleep):
+        stale = json.dumps({
+            "status": {
+                "sync": {"revision": "b" * 40, "status": "Synced"},
+                "health": {"status": "Healthy"},
+            }
+        })
+        run.return_value = subprocess.CompletedProcess([], 0, stale, "")
+        ticks = {"count": 0}
+
+        def monotonic() -> float:
+            ticks["count"] += 1
+            return 0.0 if ticks["count"] < 8 else 601.0
+
+        with patch("ci_templates.argocd.time.monotonic", side_effect=monotonic):
+            with self.assertRaises(ArgoError) as raised:
+                wait_application("argocd.example.internal", "knowledge-core-gateway-dev", "a" * 40, timeout=600)
+
+        self.assertIn("revision=" + "b" * 40, str(raised.exception))
+        self.assertIn("sync=Synced", str(raised.exception))
+        self.assertIn("health=Healthy", str(raised.exception))
 
     @patch.dict("ci_templates.github.os.environ", {"GITHUB_TOKEN": "test-token"}, clear=False)
     @patch("ci_templates.github.subprocess.run")
