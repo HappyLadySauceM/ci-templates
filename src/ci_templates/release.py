@@ -89,3 +89,55 @@ def summarize_with_deepseek(
         if summary:
             return summary[:8000]
     raise ReleaseError(f"DeepSeek returned an empty response after retry (finish_reason={finish_reason})")
+
+
+def summarize_release_with_deepseek(
+    model: str,
+    aggregate_tag: str,
+    context: dict,
+    deployed_services: list[str],
+    language: str = "en",
+) -> str:
+    """Create one bounded project summary for all shared and service changes."""
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    endpoint = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/chat/completions")
+    if not api_key:
+        raise ReleaseError("DEEPSEEK_API_KEY is required before deployment")
+    prompt = {
+        "aggregate_tag": aggregate_tag,
+        "changes": context,
+        "deployed_services": deployed_services,
+        "instruction": (
+            f"Write a concise functional release summary in {language}. Use only the supplied "
+            "redacted paths and diffs. Cover shared changes and service-specific changes in "
+            "separate Markdown bullet groups, omit empty groups, and never mention commit hashes, "
+            "branches, workflows, authors, credentials, or release metadata. Never invent details. "
+            "Return Markdown bullets only, without a title."
+        ),
+    }
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=True)}],
+        "temperature": 0.1,
+        "max_tokens": 8192,
+    }
+    request = Request(
+        endpoint,
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=120) as response:
+            result = json.loads(response.read())
+    except (HTTPError, URLError, json.JSONDecodeError) as exc:
+        raise ReleaseError(f"DeepSeek release summary failed: {exc}") from exc
+    try:
+        summary = str(result["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ReleaseError("DeepSeek returned an invalid response") from exc
+    if not summary:
+        raise ReleaseError("DeepSeek returned an empty response")
+    sections = [f"# {aggregate_tag}", "", summary[:12000], "", "## Deployed services", ""]
+    sections.extend(f"- {service}" for service in deployed_services)
+    return "\n".join(sections).rstrip() + "\n"

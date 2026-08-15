@@ -21,11 +21,12 @@ STABLE_BUILDER = "ci-templates"
 
 
 def build_jobs() -> int:
-    """Cap compile/build parallelism at three quarters of host CPUs.
-
-    将编译并行度限制为宿主机 CPU 的四分之三。
-    """
-    return max(1, (os.cpu_count() or 1) * 3 // 4)
+    """Use at most three CPUs, respecting the caller's affinity mask."""
+    try:
+        available = len(os.sched_getaffinity(0))
+    except AttributeError:
+        available = os.cpu_count() or 1
+    return max(1, min(3, available))
 
 
 def _docker(args: list[str], cwd: str = ".", check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -36,6 +37,10 @@ def _buildkitd_config(jobs: int, registry: str, registry_ca: str | None) -> str:
     lines = [
         "[worker.oci]",
         f"  max-parallelism = {jobs}",
+        "  gc = true",
+        '  reservedSpace = "2GB"',
+        '  maxUsedSpace = "8GB"',
+        '  minFreeSpace = "50GB"',
     ]
     if registry_ca:
         lines.extend(
@@ -79,15 +84,46 @@ def _ensure_builder(service: Service, jobs: int, cwd: str) -> str:
     return STABLE_BUILDER
 
 
-def build_service(service: Service, tag: str = "dev", cwd: str = ".") -> str:
+def _validate_artifact_manifest(service: Service, manifest: str | None, cwd: str) -> None:
+    if not manifest:
+        return
+    try:
+        payload = json.loads(Path(manifest).read_text(encoding="utf-8"))
+        entry = payload["services"][service.name]
+        relative = Path(str(entry["path"]))
+        expected = str(entry["sha256"])
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise BuildError(f"invalid artifact manifest for {service.name}") from exc
+    if relative.is_absolute() or ".." in relative.parts:
+        raise BuildError(f"artifact path escapes workspace for {service.name}")
+    artifact = Path(cwd) / relative
+    if not artifact.is_file():
+        raise BuildError(f"artifact is missing for {service.name}: {artifact}")
+    import hashlib
+
+    actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    if actual != expected:
+        raise BuildError(f"artifact digest mismatch for {service.name}")
+
+
+def build_service(
+    service: Service,
+    tag: str = "dev",
+    cwd: str = ".",
+    *,
+    preserve_previous: bool = True,
+    artifact_manifest: str | None = None,
+) -> str:
     image = f"{service.image_repository}:{tag}"
     cache = f"{service.image_repository}:buildcache"
     jobs = build_jobs()
+    _validate_artifact_manifest(service, artifact_manifest, cwd)
     try:
-        current = _docker(["pull", f"{service.image_repository}:dev"], cwd=cwd, check=False)
-        if current.returncode == 0:
-            _docker(["tag", f"{service.image_repository}:dev", f"{service.image_repository}:previous"], cwd=cwd)
-            _docker(["push", f"{service.image_repository}:previous"], cwd=cwd)
+        if preserve_previous:
+            current = _docker(["pull", f"{service.image_repository}:dev"], cwd=cwd, check=False)
+            if current.returncode == 0:
+                _docker(["tag", f"{service.image_repository}:dev", f"{service.image_repository}:previous"], cwd=cwd)
+                _docker(["push", f"{service.image_repository}:previous"], cwd=cwd)
         builder = _ensure_builder(service, jobs, cwd)
         _docker([
             "buildx", "build", "--builder", builder, "--push", "--provenance=false", "--sbom=false",
@@ -100,6 +136,16 @@ def build_service(service: Service, tag: str = "dev", cwd: str = ".") -> str:
     except subprocess.CalledProcessError as exc:
         raise BuildError(f"image build failed for {service.name}") from exc
     return image
+
+
+def promote_candidate(service: Service, candidate_tag: str, cwd: str = ".") -> None:
+    """Promote a registry candidate without loading it into the local daemon."""
+    source = f"{service.image_repository}:{candidate_tag}"
+    target = f"{service.image_repository}:dev"
+    try:
+        _docker(["buildx", "imagetools", "create", "--tag", target, source], cwd=cwd)
+    except subprocess.CalledProcessError as exc:
+        raise BuildError(f"cannot promote candidate for {service.name}") from exc
 
 
 def image_digest(image: str, cwd: str = ".") -> str:

@@ -12,10 +12,10 @@ import unittest
 from ci_templates.changes import affected_services, build_release_context, classify_release_paths, read_release_context
 from ci_templates.config import ConfigError, Pipeline
 from ci_templates.gitops import _git, promote_snapshot, rollback_snapshot, update_images
-from ci_templates.release import render_aggregate_release
+from ci_templates.release import render_aggregate_release, summarize_release_with_deepseek
 from ci_templates.versions import aggregate_release_tag, service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
-from ci_templates.build import BuildError, _docker, build_jobs, build_service, image_digest
+from ci_templates.build import BuildError, _docker, _validate_artifact_manifest, build_jobs, build_service, image_digest
 from ci_templates.argocd import (
     ArgoError,
     _has_revision,
@@ -708,13 +708,49 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertIn(f"max-parallelism = {build_jobs()}", observed[0])
         self.assertIn(f'[registry."org"]\n  ca = ["{ca_path}"]\n', observed[0])
 
-    def test_build_jobs_uses_three_quarters_of_cpus(self):
-        with patch("ci_templates.build.os.cpu_count", return_value=8):
-            self.assertEqual(build_jobs(), 6)
-        with patch("ci_templates.build.os.cpu_count", return_value=1):
+    def test_build_jobs_caps_at_three_and_respects_affinity(self):
+        with patch("ci_templates.build.os.sched_getaffinity", return_value=set(range(8))):
+            self.assertEqual(build_jobs(), 3)
+        with patch("ci_templates.build.os.sched_getaffinity", return_value={0}):
             self.assertEqual(build_jobs(), 1)
-        with patch("ci_templates.build.os.cpu_count", return_value=None):
-            self.assertEqual(build_jobs(), 1)
+
+    def test_artifact_manifest_requires_matching_sha256(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "artifact"
+            artifact.write_bytes(b"binary")
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({"services": {"gateway": {
+                "path": "artifact", "sha256": hashlib.sha256(b"binary").hexdigest(),
+            }}}), encoding="utf-8")
+            _validate_artifact_manifest(config().services[0], str(manifest), str(root))
+            manifest.write_text(json.dumps({"services": {"gateway": {
+                "path": "artifact", "sha256": "0" * 64,
+            }}}), encoding="utf-8")
+            with self.assertRaisesRegex(BuildError, "digest mismatch"):
+                _validate_artifact_manifest(config().services[0], str(manifest), str(root))
+
+    @patch("ci_templates.release.urlopen")
+    def test_combined_deepseek_summary_makes_one_request(self, urlopen_mock):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": "- shared and service changes"}}]}).encode()
+
+        urlopen_mock.return_value = Response()
+        with patch.dict("ci_templates.release.os.environ", {"DEEPSEEK_API_KEY": "test-key"}, clear=False):
+            body = summarize_release_with_deepseek(
+                "deepseek-v4-flash", "v1.1.7", {"shared": {}, "services": {}}, ["gateway"], "zh-CN"
+            )
+        self.assertIn("# v1.1.7", body)
+        self.assertIn("- gateway", body)
+        urlopen_mock.assert_called_once()
 
     @patch("ci_templates.build.subprocess.run")
     def test_image_digest_accepts_legacy_buildx_output(self, run):

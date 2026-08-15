@@ -10,13 +10,14 @@ from pathlib import Path
 from .changes import affected_services, build_release_context, changed_paths, read_release_context, resolve_revision, write_release_context
 from .config import ConfigError, load_config
 from .gitops import sync_snapshot, promote_snapshot, rollback_snapshot
-from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest
+from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest, promote_candidate
 from .argocd import wait_applications, wait_targets
 from .smoke import run as run_smoke, run_kubernetes
 from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
-from .release import render_aggregate_release, summarize_with_deepseek
+from .release import render_aggregate_release, summarize_release_with_deepseek, summarize_with_deepseek
 from .versions import aggregate_release_tag, next_patch, read_version, service_tag
 from .charts import ChartError, check_charts, format_result, mirror_charts
+from .harbor import HarborClient, ImageRef
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -54,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--config", default=None)
     build.add_argument("--service", required=True)
     build.add_argument("--repo", default=".")
+    build.add_argument("--tag", default="dev")
+    build.add_argument("--artifact-manifest", default=None)
+    build.add_argument("--preserve-previous", action="store_true")
 
     cleanup = subparsers.add_parser("cleanup-previous")
     cleanup.add_argument("--config", default=None)
@@ -64,6 +68,17 @@ def main(argv: list[str] | None = None) -> int:
     restore.add_argument("--config", default=None)
     restore.add_argument("--service", required=True)
     restore.add_argument("--repo", default=".")
+
+    candidate_cleanup = subparsers.add_parser("cleanup-candidate")
+    candidate_cleanup.add_argument("--config", default=None)
+    candidate_cleanup.add_argument("--service", required=True)
+    candidate_cleanup.add_argument("--tag", required=True)
+
+    candidate_promote = subparsers.add_parser("promote-candidate")
+    candidate_promote.add_argument("--config", default=None)
+    candidate_promote.add_argument("--service", required=True)
+    candidate_promote.add_argument("--tag", required=True)
+    candidate_promote.add_argument("--repo", default=".")
 
     argo = subparsers.add_parser("argo-wait")
     argo.add_argument("--config", default=None)
@@ -79,6 +94,14 @@ def main(argv: list[str] | None = None) -> int:
     release.add_argument("--services", required=True)
     release.add_argument("--repo", default=".")
     release.add_argument("--changes-file", default=None)
+    release.add_argument("--summary-file", default=None)
+
+    summarize = subparsers.add_parser("summarize")
+    summarize.add_argument("--config", default=None)
+    summarize.add_argument("--services", required=True)
+    summarize.add_argument("--changes-file", required=True)
+    summarize.add_argument("--output", required=True)
+    summarize.add_argument("--repo", default=".")
 
     prewarm = subparsers.add_parser("prewarm")
     prewarm.add_argument("--config", default=None)
@@ -143,7 +166,13 @@ def main(argv: list[str] | None = None) -> int:
             if service is None:
                 raise ConfigError(f"unknown service: {args.service}")
             if args.command == "build":
-                image = build_service(service, cwd=args.repo)
+                image = build_service(
+                    service,
+                    tag=args.tag,
+                    cwd=args.repo,
+                    preserve_previous=args.preserve_previous,
+                    artifact_manifest=args.artifact_manifest,
+                )
                 print(json.dumps({"service": service.name, "kustomize_name": service.kustomize_name, "image": image, "digest": image_digest(image, cwd=args.repo)}, sort_keys=True))
             else:
                 discard_previous(service, cwd=args.repo)
@@ -154,6 +183,19 @@ def main(argv: list[str] | None = None) -> int:
             if service is None:
                 raise ConfigError(f"unknown service: {args.service}")
             restore_previous(service, cwd=args.repo)
+        elif args.command == "cleanup-candidate":
+            config = load_config(args.config)
+            service = next((item for item in config.services if item.name == args.service), None)
+            if service is None:
+                raise ConfigError(f"unknown service: {args.service}")
+            HarborClient(config.harbor_registry).delete_tag(ImageRef.parse(f"{service.image_repository}:{args.tag}"))
+        elif args.command == "promote-candidate":
+            config = load_config(args.config)
+            service = next((item for item in config.services if item.name == args.service), None)
+            if service is None:
+                raise ConfigError(f"unknown service: {args.service}")
+            promote_candidate(service, args.tag, cwd=args.repo)
+            print(json.dumps({"service": service.name, "tag": args.tag}, sort_keys=True))
         elif args.command == "argo-wait":
             config = load_config(args.config)
             if not config.argocd_server:
@@ -179,6 +221,20 @@ def main(argv: list[str] | None = None) -> int:
                 run_kubernetes(namespace=os.environ.get("APPLICATION_NAMESPACE", "knowledge-core-dev"), kubeconfig=os.environ["KUBECONFIG"])
             else:
                 run_smoke(config.smoke_command, cwd=args.repo)
+        elif args.command == "summarize":
+            config = load_config(args.config)
+            selected = {item.strip() for item in args.services.split(",") if item.strip()}
+            deployed = [service.name for service in config.services if service.name in selected]
+            if not deployed:
+                raise ConfigError("no affected services selected for summary")
+            context = read_release_context(args.changes_file)
+            aggregate_version = read_version(Path(args.repo) / config.aggregate_version_file)
+            aggregate_tag = aggregate_release_tag(config.aggregate_release_prefix, aggregate_version, cwd=args.repo)
+            body = summarize_release_with_deepseek(config.deepseek_model, aggregate_tag, context, deployed, config.release_language)
+            destination = Path(args.output)
+            destination.write_text(body, encoding="utf-8")
+            destination.chmod(0o600)
+            print(json.dumps({"summary_file": str(destination), "release": aggregate_tag}, sort_keys=True))
         elif args.command == "release":
             config = load_config(args.config)
             selected = {item.strip() for item in args.services.split(",") if item.strip()}
@@ -201,40 +257,43 @@ def main(argv: list[str] | None = None) -> int:
                 raise ConfigError("release change context does not match the checked-out commit")
             aggregate_version = read_version(Path(args.repo) / config.aggregate_version_file)
             aggregate_tag = aggregate_release_tag(config.aggregate_release_prefix, aggregate_version, cwd=args.repo)
-            shared_changes = context.get("shared")
-            shared_summary = ""
-            if isinstance(shared_changes, dict) and (shared_changes.get("paths") or shared_changes.get("diff")):
-                shared_summary = summarize_with_deepseek(
-                    config.deepseek_model,
-                    config.aggregate_release_prefix,
-                    aggregate_tag,
-                    shared_changes,
-                    config.release_language,
-                    shared=True,
-                )
-            service_entries: list[tuple[str, str]] = []
-            for service in config.services:
-                service_changes = context.get("services", {}).get(service.name)
-                if not isinstance(service_changes, dict):
-                    continue
-                if not (service_changes.get("paths") or service_changes.get("diff")):
-                    continue
-                summary = summarize_with_deepseek(
-                    config.deepseek_model,
-                    service.name,
-                    aggregate_tag,
-                    service_changes,
-                    config.release_language,
-                )
-                service_entries.append((service.name, summary))
-            if not shared_summary and not service_entries:
-                raise ConfigError("release change context has no shared or service-specific changes")
-            release_body = render_aggregate_release(
-                aggregate_tag,
-                shared_summary,
-                service_entries,
-                deployed,
-            )
+            if args.summary_file:
+                try:
+                    release_body = Path(args.summary_file).read_text(encoding="utf-8")
+                except OSError as exc:
+                    raise ConfigError(f"cannot read release summary: {exc}") from exc
+                if not release_body.strip():
+                    raise ConfigError("release summary is empty")
+            else:
+                shared_changes = context.get("shared")
+                shared_summary = ""
+                if isinstance(shared_changes, dict) and (shared_changes.get("paths") or shared_changes.get("diff")):
+                    shared_summary = summarize_with_deepseek(
+                        config.deepseek_model,
+                        config.aggregate_release_prefix,
+                        aggregate_tag,
+                        shared_changes,
+                        config.release_language,
+                        shared=True,
+                    )
+                service_entries: list[tuple[str, str]] = []
+                for service in config.services:
+                    service_changes = context.get("services", {}).get(service.name)
+                    if not isinstance(service_changes, dict):
+                        continue
+                    if not (service_changes.get("paths") or service_changes.get("diff")):
+                        continue
+                    summary = summarize_with_deepseek(
+                        config.deepseek_model,
+                        service.name,
+                        aggregate_tag,
+                        service_changes,
+                        config.release_language,
+                    )
+                    service_entries.append((service.name, summary))
+                if not shared_summary and not service_entries:
+                    raise ConfigError("release change context has no shared or service-specific changes")
+                release_body = render_aggregate_release(aggregate_tag, shared_summary, service_entries, deployed)
             fast_forward_main(cwd=args.repo)
             target_commit = subprocess.run(
                 ["git", "rev-parse", "HEAD"],

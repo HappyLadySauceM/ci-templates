@@ -14,6 +14,8 @@ For a one-time migration from older service Releases, verify their tags first, c
 
 Build locally with `PYTHONPATH=src python3 -m unittest discover -s tests -v` and `docker build -t ci-templates:dev .`. The pinned `ci-templates-publish` workflow publishes the version from `VERSION` to Harbor; production workflows should pin that image by digest after the first successful publish.
 
-Image builds reuse a stable Buildx builder named `ci-templates` so BuildKit cache mounts survive across services on the same runner. Compile parallelism is capped at three quarters of host CPUs via BuildKit `max-parallelism` and the `BUILD_JOBS` build-arg.
+Image builds reuse a stable Buildx builder named `ci-templates` so BuildKit cache mounts survive across services on the same runner. Compile/build parallelism is capped at three CPUs and respects the runner cgroup affinity. BuildKit garbage collection keeps the builder below its configured disk watermarks. Projects may pass a SHA256-checked artifact manifest to `build`; this allows runtime-only Dockerfiles to package binaries produced by the quality job without compiling again.
+
+For aggregate releases, `summarize --changes-file ... --services ... --output ...` performs one bounded DeepSeek request and writes a reusable release body. `release --summary-file ...` consumes that body without making another model request.
 
 `charts-check` downloads every chart declared in a version 1 YAML manifest, verifies its source SHA256, applies only explicitly listed template removals or repository-owned replacements, renders twice, and rejects nondeterministic output, duplicate resources, or any rendered `Secret`. `charts-mirror` runs the same gates before pushing the packaged chart to the configured OCI repository and refreshing optional vendored charts. Registry credentials are supplied through Helm's runtime registry configuration; they are never fields in the manifest.
