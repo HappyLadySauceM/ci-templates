@@ -11,7 +11,7 @@ from .changes import affected_services, build_release_context, changed_paths, re
 from .config import ConfigError, load_config
 from .gitops import sync_snapshot, promote_snapshot, rollback_snapshot
 from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest
-from .argocd import wait_application
+from .argocd import wait_applications, wait_targets
 from .smoke import run as run_smoke, run_kubernetes
 from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
 from .release import render_aggregate_release, summarize_with_deepseek
@@ -68,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     argo = subparsers.add_parser("argo-wait")
     argo.add_argument("--config", default=None)
     argo.add_argument("--revision", required=True)
+    argo.add_argument("--services", default="")
 
     smoke = subparsers.add_parser("smoke")
     smoke.add_argument("--config", default=None)
@@ -155,9 +156,23 @@ def main(argv: list[str] | None = None) -> int:
             restore_previous(service, cwd=args.repo)
         elif args.command == "argo-wait":
             config = load_config(args.config)
-            if not config.argocd_server or not config.argocd_application:
-                raise ConfigError("argocd_server and argocd_application are required")
-            wait_application(config.argocd_server, config.argocd_application, args.revision)
+            if not config.argocd_server:
+                raise ConfigError("argocd_server is required")
+            selected = [item.strip() for item in args.services.split(",") if item.strip()]
+            overrides = json.loads(os.environ.get("CI_GITOPS_IMAGE_OVERRIDES_JSON", "{}") or "{}")
+            if not isinstance(overrides, dict):
+                raise ConfigError("CI_GITOPS_IMAGE_OVERRIDES_JSON must be an object")
+            if selected:
+                services = [service for service in config.services if service.name in selected]
+                missing = [name for name in selected if name not in {service.name for service in services}]
+                if missing:
+                    raise ConfigError(f"unknown service: {', '.join(missing)}")
+                targets = wait_targets(services, overrides)
+            else:
+                if not config.argocd_application:
+                    raise ConfigError("argocd_server and argocd_application are required")
+                targets = {config.argocd_application: ()}
+            wait_applications(config.argocd_server, tuple(targets), args.revision, expected_images=targets)
         elif args.command == "smoke":
             config = load_config(args.config)
             if os.environ.get("KUBECONFIG"):

@@ -16,7 +16,15 @@ from ci_templates.release import render_aggregate_release
 from ci_templates.versions import aggregate_release_tag, service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
 from ci_templates.build import BuildError, _docker, build_jobs, build_service, image_digest
-from ci_templates.argocd import ArgoError, _has_revision, _observed_revisions, _ready_state, wait_application
+from ci_templates.argocd import (
+    ArgoError,
+    _has_revision,
+    _observed_revisions,
+    _ready_state,
+    wait_application,
+    wait_applications,
+    wait_targets,
+)
 from ci_templates.github import create_and_push_tag, fast_forward_main
 
 
@@ -101,6 +109,19 @@ class CiTemplatesTest(unittest.TestCase):
 
     def test_unrelated_changes_are_ignored(self):
         self.assertEqual(affected_services(config(), ["docs/README.md"]), ())
+
+    def test_wait_targets_map_service_overrides_to_application_images(self):
+        pipeline = config()
+        targets = wait_targets(
+            pipeline.services,
+            {"knowledge-core-gateway": {"newName": "org/gateway", "digest": "sha256:" + "c" * 64}},
+        )
+        self.assertEqual(
+            targets,
+            {
+                "knowledge-core-gateway-dev": ("org/gateway@sha256:" + "c" * 64,),
+            },
+        )
 
 
     def test_service_tag(self):
@@ -246,6 +267,34 @@ class CiTemplatesTest(unittest.TestCase):
         ready, _ = _ready_state(payload, desired)
         self.assertTrue(ready)
 
+    def test_argo_ready_accepts_summary_images_when_revision_differs(self):
+        desired = "a" * 40
+        image = "harbor.example.invalid/gateway@sha256:" + "c" * 64
+        payload = {
+            "status": {
+                "sync": {"revision": "b" * 40, "status": "Synced"},
+                "health": {"status": "Healthy"},
+                "summary": {"images": [image]},
+            }
+        }
+        ready, _ = _ready_state(payload, desired, expected_images=(image,))
+        self.assertTrue(ready)
+
+    def test_argo_ready_rejects_healthy_app_without_expected_image(self):
+        payload = {
+            "status": {
+                "sync": {"revision": "b" * 40, "status": "Synced"},
+                "health": {"status": "Healthy"},
+                "summary": {"images": ["harbor.example.invalid/gateway@sha256:" + "d" * 64]},
+            }
+        }
+        ready, _ = _ready_state(
+            payload,
+            "a" * 40,
+            expected_images=("harbor.example.invalid/gateway@sha256:" + "c" * 64,),
+        )
+        self.assertFalse(ready)
+
     @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
     @patch("ci_templates.argocd.time.sleep", return_value=None)
     @patch("ci_templates.argocd.subprocess.run")
@@ -282,11 +331,13 @@ class CiTemplatesTest(unittest.TestCase):
     @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
     @patch("ci_templates.argocd.time.sleep", return_value=None)
     @patch("ci_templates.argocd.subprocess.run")
-    def test_argo_wait_times_out_when_healthy_at_another_revision(self, run, _sleep):
+    def test_argo_wait_times_out_when_healthy_at_another_revision_without_image(self, run, _sleep):
+        desired_image = "harbor.example.invalid/gateway@sha256:" + "c" * 64
         stale = json.dumps({
             "status": {
                 "sync": {"revision": "b" * 40, "status": "Synced"},
                 "health": {"status": "Healthy"},
+                "summary": {"images": ["harbor.example.invalid/gateway@sha256:" + "d" * 64]},
             }
         })
         run.return_value = subprocess.CompletedProcess([], 0, stale, "")
@@ -298,11 +349,103 @@ class CiTemplatesTest(unittest.TestCase):
 
         with patch("ci_templates.argocd.time.monotonic", side_effect=monotonic):
             with self.assertRaises(ArgoError) as raised:
-                wait_application("argocd.example.internal", "knowledge-core-gateway-dev", "a" * 40, timeout=600)
+                wait_application(
+                    "argocd.example.internal",
+                    "knowledge-core-gateway-dev",
+                    "a" * 40,
+                    timeout=600,
+                    expected_images=(desired_image,),
+                )
 
         self.assertIn("revision=" + "b" * 40, str(raised.exception))
         self.assertIn("sync=Synced", str(raised.exception))
         self.assertIn("health=Healthy", str(raised.exception))
+
+    @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
+    @patch("ci_templates.argocd.time.sleep", return_value=None)
+    @patch("ci_templates.argocd.subprocess.run")
+    def test_argo_wait_accepts_healthy_app_at_another_revision_with_expected_image(self, run, _sleep):
+        desired = "a" * 40
+        image = "harbor.example.invalid/gateway@sha256:" + "c" * 64
+        current = json.dumps({
+            "status": {
+                "sync": {"revision": "b" * 40, "status": "Synced"},
+                "health": {"status": "Healthy"},
+                "summary": {"images": [image]},
+            }
+        })
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, current, ""),
+        ]
+
+        payload = wait_application(
+            "argocd.example.invalid",
+            "knowledge-core-gateway-dev",
+            desired,
+            timeout=30,
+            expected_images=(image,),
+        )
+
+        self.assertEqual(payload["status"]["sync"]["revision"], "b" * 40)
+        self.assertEqual(payload["status"]["summary"]["images"], [image])
+
+    @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
+    @patch("ci_templates.argocd.time.sleep", return_value=None)
+    @patch("ci_templates.argocd.subprocess.run")
+    def test_argo_wait_fails_immediately_when_refresh_is_denied(self, run, _sleep):
+        run.return_value = subprocess.CompletedProcess([], 1, "", "Error from server (Forbidden)")
+
+        with self.assertRaises(ArgoError) as raised:
+            wait_application("argocd.example.internal", "knowledge-core-gateway-dev", "a" * 40, timeout=600)
+
+        self.assertIn("hard-refresh", str(raised.exception))
+        self.assertIn("Forbidden", str(raised.exception))
+        self.assertEqual(run.call_count, 1)
+
+    @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
+    @patch("ci_templates.argocd.time.sleep", return_value=None)
+    @patch("ci_templates.argocd.subprocess.run")
+    def test_argo_wait_applications_ready_when_all_apps_healthy(self, run, _sleep):
+        revision = "a" * 40
+        gateway_image = "harbor.example.invalid/gateway@sha256:" + "c" * 64
+        identity_image = "harbor.example.invalid/identity@sha256:" + "d" * 64
+        gateway = json.dumps({
+            "status": {
+                "sync": {"revision": revision, "status": "Synced"},
+                "health": {"status": "Healthy"},
+                "summary": {"images": [gateway_image]},
+            }
+        })
+        identity = json.dumps({
+            "status": {
+                "sync": {"revision": "b" * 40, "status": "Synced"},
+                "health": {"status": "Healthy"},
+                "summary": {"images": [identity_image]},
+            }
+        })
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, gateway, ""),
+            subprocess.CompletedProcess([], 0, identity, ""),
+        ]
+
+        payloads = wait_applications(
+            "argocd.example.invalid",
+            ("knowledge-core-gateway-dev", "knowledge-core-identity-dev"),
+            revision,
+            timeout=30,
+            expected_images={
+                "knowledge-core-gateway-dev": (gateway_image,),
+                "knowledge-core-identity-dev": (identity_image,),
+            },
+        )
+
+        self.assertEqual(set(payloads), {"knowledge-core-gateway-dev", "knowledge-core-identity-dev"})
+        commands = [list(item.args[0]) for item in run.call_args_list]
+        annotate = [command for command in commands if "annotate" in command]
+        self.assertEqual(len(annotate), 2, commands)
 
     @patch.dict("ci_templates.github.os.environ", {"GITHUB_TOKEN": "test-token"}, clear=False)
     @patch("ci_templates.github.subprocess.run")
