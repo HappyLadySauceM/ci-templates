@@ -2,12 +2,44 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
 class ReleaseError(RuntimeError):
     pass
+
+
+_RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+_DEEPSEEK_ATTEMPTS = 3
+
+
+def _deepseek_request(endpoint: str, api_key: str, body: dict, *, validate=None) -> dict:
+    """Make one bounded remote request, retrying only transient failures."""
+    request = Request(
+        endpoint,
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    last_error: Exception | None = None
+    for attempt in range(_DEEPSEEK_ATTEMPTS):
+        try:
+            with urlopen(request, timeout=120) as response:
+                result = json.loads(response.read())
+                if validate is not None and not validate(result):
+                    raise ValueError("DeepSeek returned an empty or invalid response")
+                return result
+        except HTTPError as exc:
+            if exc.code not in _RETRYABLE_HTTP_STATUS:
+                raise ReleaseError(f"DeepSeek release summary failed: HTTP {exc.code}") from exc
+            last_error = exc
+        except (URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+            last_error = exc
+        if attempt < _DEEPSEEK_ATTEMPTS - 1:
+            time.sleep(2**attempt)
+    raise ReleaseError(f"DeepSeek release summary failed after {_DEEPSEEK_ATTEMPTS} attempts: {last_error}") from last_error
 
 
 def render_aggregate_release(
@@ -74,12 +106,7 @@ def summarize_with_deepseek(
             "temperature": 0.1,
             "max_tokens": max_tokens,
         }
-        request = Request(endpoint, data=json.dumps(body).encode(), headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
-        try:
-            with urlopen(request, timeout=120) as response:
-                result = json.loads(response.read())
-        except (HTTPError, URLError, json.JSONDecodeError) as exc:
-            raise ReleaseError(f"DeepSeek release summary failed: {exc}") from exc
+        result = _deepseek_request(endpoint, api_key, body)
         try:
             choice = result["choices"][0]
             finish_reason = str(choice.get("finish_reason", "unknown"))
@@ -121,17 +148,14 @@ def summarize_release_with_deepseek(
         "temperature": 0.1,
         "max_tokens": 8192,
     }
-    request = Request(
+    result = _deepseek_request(
         endpoint,
-        data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
+        api_key,
+        body,
+        validate=lambda value: bool(value.get("choices", [{}])[0].get("message", {}).get("content"))
+        if isinstance(value, dict) and isinstance(value.get("choices"), list) and value.get("choices")
+        else False,
     )
-    try:
-        with urlopen(request, timeout=120) as response:
-            result = json.loads(response.read())
-    except (HTTPError, URLError, json.JSONDecodeError) as exc:
-        raise ReleaseError(f"DeepSeek release summary failed: {exc}") from exc
     try:
         summary = str(result["choices"][0]["message"]["content"] or "").strip()
     except (KeyError, IndexError, TypeError) as exc:
