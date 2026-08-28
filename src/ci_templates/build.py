@@ -58,7 +58,13 @@ def _ensure_builder(service: Service, jobs: int, cwd: str) -> str:
     if inspect.returncode == 0:
         return STABLE_BUILDER
 
-    create_args = ["buildx", "create", "--driver", "docker-container", "--name", STABLE_BUILDER]
+    # The runner reaches Harbor through its host DNS/network.  BuildKit runs in
+    # a container, so keep that container on host networking as well; otherwise
+    # private registry names resolve on the host but not inside BuildKit.
+    create_args = [
+        "buildx", "create", "--driver", "docker-container",
+        "--driver-opt", "network=host", "--name", STABLE_BUILDER,
+    ]
     registry_ca = os.environ.get("CI_REGISTRY_CA_FILE", "").strip()
     buildkit_config: tempfile.TemporaryDirectory[str] | None = None
     try:
