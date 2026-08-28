@@ -62,6 +62,10 @@ jobs:
               ;;
           esac
           image="$CI_IMAGE:v$version"
+          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            echo "Published image already exists: $image"
+            exit 0
+          fi
           docker build --network host --tag "$image" .
           docker push "$image"
           digest="$(docker buildx imagetools inspect "$image" | awk '/^Digest:/ {print $2; exit}')"
