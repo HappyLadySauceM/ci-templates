@@ -62,7 +62,7 @@ jobs:
               ;;
           esac
           image="$CI_IMAGE:v$version"
-          docker build --tag "$image" .
+          docker build --network host --tag "$image" .
           docker push "$image"
           digest="$(docker buildx imagetools inspect "$image" | awk '/^Digest:/ {print $2; exit}')"
           test -n "$digest"
