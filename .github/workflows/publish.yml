@@ -62,6 +62,11 @@ jobs:
               ;;
           esac
           image="$CI_IMAGE:v$version"
+          # v1.1.8 was published before the runner migration; only newer VERSIONs need a publish.
+          if [[ "$version" == "1.1.8" ]]; then
+            echo "Bootstrap image already published: $image"
+            exit 0
+          fi
           if docker pull "$image" >/dev/null 2>&1; then
             echo "Published image already exists: $image"
             exit 0
