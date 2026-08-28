@@ -28,6 +28,7 @@ RUN apt-get update \
     && rm /tmp/helm.tar.gz
 
 WORKDIR /workspace
+RUN git config --system --add safe.directory /workspace
 COPY pyproject.toml VERSION README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir .
