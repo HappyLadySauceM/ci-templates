@@ -62,7 +62,7 @@ jobs:
               ;;
           esac
           image="$CI_IMAGE:v$version"
-          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+          if docker pull "$image" >/dev/null 2>&1; then
             echo "Published image already exists: $image"
             exit 0
           fi
