@@ -67,8 +67,8 @@ jobs:
             exit 0
           fi
           docker build --network host --tag "$image" .
-          docker push "$image"
-          digest="$(docker buildx imagetools inspect "$image" | awk '/^Digest:/ {print $2; exit}')"
+          push_output="$(docker push "$image" 2>&1 | tee /dev/stderr)"
+          digest="$(awk '/: digest: sha256:/ {sub(/^.*digest: /, ""); sub(/ .*/, ""); print; exit}' <<<"$push_output")"
           test -n "$digest"
           echo "Published $image@$digest"
           {
