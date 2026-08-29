@@ -56,8 +56,11 @@ def render_aggregate_release(
         sections.extend(["## Service-specific changes", ""])
         for service, summary in service_entries:
             sections.extend([f"### {service}", "", summary.strip(), ""])
-    sections.extend(["## Deployed services", ""])
-    sections.extend(f"- {service}" for service in deployed_services)
+    if deployed_services:
+        sections.extend(["## Affected services", ""])
+        sections.extend(f"- {service}" for service in deployed_services)
+    else:
+        sections.extend(["## Deployment scope", "", "- Shared deployment configuration"])
     return "\n".join(sections).rstrip() + "\n"
 
 
@@ -162,6 +165,10 @@ def summarize_release_with_deepseek(
         raise ReleaseError("DeepSeek returned an invalid response") from exc
     if not summary:
         raise ReleaseError("DeepSeek returned an empty response")
-    sections = [f"# {aggregate_tag}", "", summary[:12000], "", "## Deployed services", ""]
-    sections.extend(f"- {service}" for service in deployed_services)
+    sections = [f"# {aggregate_tag}", "", summary[:12000], ""]
+    if deployed_services:
+        sections.extend(["## Affected services", ""])
+        sections.extend(f"- {service}" for service in deployed_services)
+    else:
+        sections.extend(["## Deployment scope", "", "- Shared deployment configuration"])
     return "\n".join(sections).rstrip() + "\n"

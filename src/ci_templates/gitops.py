@@ -7,6 +7,7 @@ import sys
 import tempfile
 import base64
 import os
+import time
 from typing import Any
 
 import yaml
@@ -71,29 +72,39 @@ def promote_snapshot(source_deploy: str | Path, gitops_repo: str, gitops_path: s
     if token and gitops_repo.startswith("https://"):
         encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         git_args = ["-c", f"http.extraheader=AUTHORIZATION: basic {encoded}"]
-    with tempfile.TemporaryDirectory(prefix="gitops-commit-") as temp:
-        worktree = Path(temp) / "repo"
-        subprocess.run(["git", *git_args, "clone", "--depth", "1", "--branch", branch, gitops_repo, str(worktree)], check=True, capture_output=True, text=True, env=git_env)
-        base_revision = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
-        target = worktree / gitops_path / "deploy"
-        sync_snapshot(source, target)
-        if image_overrides:
-            update_images(worktree / gitops_path / kustomization, image_overrides)
-        marker = worktree / gitops_path / ".source-revision"
-        marker.write_text(source_sha.strip() + "\n", encoding="utf-8")
-        _configure_identity(worktree)
-        _git([
-            "add",
-            str(Path(gitops_path) / "deploy"),
-            str(Path(gitops_path) / ".source-revision"),
-            str(Path(gitops_path) / kustomization),
-        ], cwd=worktree)
-        changed = _git(["diff", "--cached", "--quiet"], cwd=worktree, check=False)
-        if changed.returncode == 0:
-            return base_revision, base_revision
-        _git(["commit", "-m", f"chore({gitops_path}): sync deploy from {source_sha[:12]}"], cwd=worktree)
-        _git([*git_args, "push", "origin", f"HEAD:{branch}"], cwd=worktree, env=git_env)
-        return subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip(), base_revision
+    last_push_error: subprocess.CalledProcessError | None = None
+    for attempt in range(3):
+        with tempfile.TemporaryDirectory(prefix="gitops-commit-") as temp:
+            worktree = Path(temp) / "repo"
+            subprocess.run(["git", *git_args, "clone", "--depth", "1", "--branch", branch, gitops_repo, str(worktree)], check=True, capture_output=True, text=True, env=git_env)
+            base_revision = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+            target = worktree / gitops_path / "deploy"
+            sync_snapshot(source, target)
+            if image_overrides:
+                update_images(worktree / gitops_path / kustomization, image_overrides)
+            marker = worktree / gitops_path / ".source-revision"
+            marker.write_text(source_sha.strip() + "\n", encoding="utf-8")
+            _configure_identity(worktree)
+            _git([
+                "add",
+                str(Path(gitops_path) / "deploy"),
+                str(Path(gitops_path) / ".source-revision"),
+                str(Path(gitops_path) / kustomization),
+            ], cwd=worktree)
+            changed = _git(["diff", "--cached", "--quiet"], cwd=worktree, check=False)
+            if changed.returncode == 0:
+                return base_revision, base_revision
+            _git(["commit", "-m", f"chore({gitops_path}): sync deploy from {source_sha[:12]}"], cwd=worktree)
+            try:
+                _git([*git_args, "push", "origin", f"HEAD:{branch}"], cwd=worktree, env=git_env)
+            except subprocess.CalledProcessError as exc:
+                last_push_error = exc
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                break
+            return subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip(), base_revision
+    raise GitOpsError("GitOps branch moved during snapshot promotion after 3 attempts") from last_push_error
 
 
 def rollback_snapshot(gitops_repo: str, branch: str, revision: str) -> str:

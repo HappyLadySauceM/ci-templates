@@ -54,6 +54,7 @@ class Pipeline:
     aggregate_version_file: str
     release_language: str
     base_images: tuple[tuple[str, str], ...]
+    deploy_root: str
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "Pipeline":
@@ -85,8 +86,11 @@ class Pipeline:
         aggregate_prefix = value.get("aggregate_release_prefix", project_slug)
         aggregate_version_file = value.get("aggregate_version_file", "VERSION")
         release_language = value.get("release_language", "en")
+        deploy_root = value.get("deploy_root", "deploy")
         if not all(isinstance(item, str) and item.strip() for item in (aggregate_prefix, aggregate_version_file, release_language)):
             raise ConfigError("aggregate release settings must be non-empty strings")
+        if not isinstance(deploy_root, str) or not deploy_root.strip() or deploy_root.startswith(("/", "\\")) or ".." in Path(deploy_root).parts:
+            raise ConfigError("deploy_root must be a safe relative path")
         return cls(
             project=value["project"],
             source_repo=value["source_repo"],
@@ -107,6 +111,7 @@ class Pipeline:
             aggregate_version_file=aggregate_version_file,
             release_language=release_language,
             base_images=tuple(base_images),
+            deploy_root=deploy_root,
         )
 
 

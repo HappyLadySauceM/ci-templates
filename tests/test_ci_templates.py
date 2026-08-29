@@ -9,7 +9,15 @@ from unittest.mock import call, patch
 
 import unittest
 
-from ci_templates.changes import affected_services, build_release_context, classify_release_paths, read_release_context
+from ci_templates.changes import (
+    affected_services,
+    build_release_context,
+    classify_release_paths,
+    deploy_changed,
+    deploy_services,
+    read_release_context,
+    release_services,
+)
 from ci_templates.config import ConfigError, Pipeline
 from ci_templates.gitops import _git, promote_snapshot, rollback_snapshot, update_images
 from ci_templates.release import render_aggregate_release, summarize_release_with_deepseek
@@ -109,6 +117,20 @@ class CiTemplatesTest(unittest.TestCase):
 
     def test_unrelated_changes_are_ignored(self):
         self.assertEqual(affected_services(config(), ["docs/README.md"]), ())
+
+    def test_deploy_changes_are_separate_from_image_builds(self):
+        paths = ["deploy/gateway/overlay/dev/config.yaml"]
+        self.assertEqual(affected_services(multi_service_config(), paths), ())
+        self.assertEqual(deploy_services(multi_service_config(), paths), ("gateway",))
+        self.assertEqual(release_services(multi_service_config(), paths), ("gateway",))
+        self.assertTrue(deploy_changed(multi_service_config(), paths))
+
+    def test_root_deploy_change_triggers_snapshot_without_service_build(self):
+        paths = ["deploy/nacos/gateway.dynamic.yaml"]
+        self.assertEqual(affected_services(multi_service_config(), paths), ())
+        self.assertEqual(deploy_services(multi_service_config(), paths), ())
+        self.assertEqual(release_services(multi_service_config(), paths), ())
+        self.assertTrue(deploy_changed(multi_service_config(), paths))
 
     def test_wait_targets_map_service_overrides_to_application_images(self):
         pipeline = config()
@@ -231,7 +253,7 @@ class CiTemplatesTest(unittest.TestCase):
             "\n"
             "- Cap BUILD_JOBS at three quarters of host CPUs.\n"
             "\n"
-            "## Deployed services\n"
+            "## Affected services\n"
             "\n"
             "- gateway\n"
             "- identity\n"
@@ -515,7 +537,7 @@ class CiTemplatesTest(unittest.TestCase):
             "org/example",
             "v1.2.1",
             "a" * 40,
-            "# v1.2.1\n\n## Service-specific changes\n\n### gateway\n\nsummary\n\n## Deployed services\n\n- gateway\n",
+            "# v1.2.1\n\n## Service-specific changes\n\n### gateway\n\nsummary\n\n## Affected services\n\n- gateway\n",
             name="v1.2.1",
         )
         summarize.assert_called_once()
@@ -708,11 +730,21 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertIn(f"max-parallelism = {build_jobs()}", observed[0])
         self.assertIn(f'[registry."org"]\n  ca = ["{ca_path}"]\n', observed[0])
 
-    def test_build_jobs_caps_at_three_and_respects_affinity(self):
+    def test_build_jobs_uses_cpu_ratio_and_respects_affinity(self):
         with patch("ci_templates.build.os.sched_getaffinity", return_value=set(range(8))):
-            self.assertEqual(build_jobs(), 3)
+            self.assertEqual(build_jobs(), 6)
         with patch("ci_templates.build.os.sched_getaffinity", return_value={0}):
             self.assertEqual(build_jobs(), 1)
+
+    def test_build_jobs_uses_configured_cpu_percentage_and_override(self):
+        with patch("ci_templates.build.os.sched_getaffinity", return_value=set(range(8))):
+            with patch.dict("ci_templates.build.os.environ", {"BUILD_CPU_PERCENT": "50"}, clear=False):
+                self.assertEqual(build_jobs(), 4)
+            with patch.dict("ci_templates.build.os.environ", {"BUILD_CPU_PERCENT": "101"}, clear=False):
+                with self.assertRaisesRegex(BuildError, "BUILD_CPU_PERCENT"):
+                    build_jobs()
+            with patch.dict("ci_templates.build.os.environ", {"BUILD_JOBS": "99"}, clear=False):
+                self.assertEqual(build_jobs(), 8)
 
     def test_artifact_manifest_requires_matching_sha256(self):
         import tempfile

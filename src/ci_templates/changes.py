@@ -88,6 +88,16 @@ def _service_business_match(service: Service, path: str) -> bool:
     return path in {service.source_path, service.deploy_snapshot} or _is_under_prefix(path, source) or _is_under_prefix(path, deploy)
 
 
+def _service_source_match(service: Service, path: str) -> bool:
+    source = service.source_path.rstrip("/")
+    return path in {service.source_path, service.dockerfile} or _is_under_prefix(path, source)
+
+
+def _service_deploy_match(service: Service, path: str) -> bool:
+    deploy = service.deploy_snapshot.rstrip("/")
+    return path == deploy or _is_under_prefix(path, deploy)
+
+
 def _bucket_diff(base: str, head: str, paths: list[str], cwd: str) -> dict[str, Any]:
     limited = paths[:MAX_CONTEXT_PATHS]
     diff = "\n".join(_redact_diff(path, _diff(base, head, [path], cwd)) for path in limited)
@@ -164,10 +174,29 @@ def affected_services(pipeline: Pipeline, paths: Iterable[str]) -> tuple[str, ..
         return ()
     affected: set[str] = set()
     for service in pipeline.services:
-        prefixes = (service.source_path.rstrip("/") + "/", service.deploy_snapshot.rstrip("/") + "/")
-        if any(path in {service.source_path, service.dockerfile} or path.startswith(prefixes) for path in paths):
+        if any(_service_source_match(service, path) for path in paths):
             affected.add(service.name)
     shared = _shared_prefixes(pipeline)
     if any(_is_under_prefix(path, prefix) for path in paths for prefix in shared):
         affected.update(service.name for service in pipeline.services)
     return tuple(service.name for service in pipeline.services if service.name in affected)
+
+
+def deploy_services(pipeline: Pipeline, paths: Iterable[str]) -> tuple[str, ...]:
+    paths = tuple(paths)
+    return tuple(
+        service.name
+        for service in pipeline.services
+        if any(_service_deploy_match(service, path) for path in paths)
+    )
+
+
+def deploy_changed(pipeline: Pipeline, paths: Iterable[str]) -> bool:
+    root = pipeline.deploy_root.rstrip("/")
+    return any(_is_under_prefix(path, root) for path in paths)
+
+
+def release_services(pipeline: Pipeline, paths: Iterable[str]) -> tuple[str, ...]:
+    build = set(affected_services(pipeline, paths))
+    deploy = set(deploy_services(pipeline, paths))
+    return tuple(service.name for service in pipeline.services if service.name in build | deploy)

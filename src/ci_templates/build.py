@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -18,15 +19,110 @@ class BuildError(RuntimeError):
 
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 STABLE_BUILDER = "ci-templates"
+DEFAULT_CPU_PERCENT = 75
+_BUILDER_STATE_FILE = "ci-templates-resource.json"
+
+
+def _cpu_percent() -> int:
+    value = os.environ.get("BUILD_CPU_PERCENT", str(DEFAULT_CPU_PERCENT)).strip()
+    try:
+        percent = int(value)
+    except ValueError as exc:
+        raise BuildError("BUILD_CPU_PERCENT must be an integer from 1 to 100") from exc
+    if not 1 <= percent <= 100:
+        raise BuildError("BUILD_CPU_PERCENT must be an integer from 1 to 100")
+    return percent
+
+
+def _affinity_cpus() -> int:
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)
+
+
+def _quota_cpus() -> int | None:
+    """Return the integer CPU quota when the current cgroup exposes one."""
+    candidates = (
+        Path("/sys/fs/cgroup/cpu.max"),
+        Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
+    )
+    for path in candidates:
+        try:
+            fields = path.read_text(encoding="utf-8").split()
+        except OSError:
+            continue
+        if path.name == "cpu.max":
+            if len(fields) < 2 or fields[0] == "max":
+                return None
+            quota, period = fields[0], fields[1]
+        else:
+            try:
+                period = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text(encoding="utf-8").strip()
+            except OSError:
+                return None
+            quota = fields[0] if fields else "-1"
+            if quota == "-1":
+                return None
+        try:
+            quota_value = float(quota)
+            period_value = float(period)
+        except ValueError:
+            return None
+        if quota_value <= 0 or period_value <= 0:
+            return None
+        return max(1, math.floor(quota_value / period_value))
+    return None
+
+
+def available_cpus() -> int:
+    affinity = _affinity_cpus()
+    quota = _quota_cpus()
+    return max(1, min(affinity, quota) if quota is not None else affinity)
 
 
 def build_jobs() -> int:
-    """Use at most three CPUs, respecting the caller's affinity mask."""
+    """Use a CPU percentage, respecting affinity and cgroup quotas.
+
+    BUILD_JOBS is an optional emergency override, still bounded by available
+    CPUs. BUILD_CPU_PERCENT is the normal, ratio-based configuration.
+    """
+    available = available_cpus()
+    override = os.environ.get("BUILD_JOBS", "").strip()
+    if override:
+        try:
+            requested = int(override)
+        except ValueError as exc:
+            raise BuildError("BUILD_JOBS must be a positive integer") from exc
+        if requested < 1:
+            raise BuildError("BUILD_JOBS must be a positive integer")
+        return min(requested, available)
+    return max(1, available * _cpu_percent() // 100)
+
+
+def _builder_state_path() -> Path:
+    root = os.environ.get("BUILDX_CONFIG", "").strip()
+    if root:
+        return Path(root) / _BUILDER_STATE_FILE
+    return Path.home() / ".docker" / "buildx" / _BUILDER_STATE_FILE
+
+
+def _builder_matches(jobs: int, registry: str) -> bool:
     try:
-        available = len(os.sched_getaffinity(0))
-    except AttributeError:
-        available = os.cpu_count() or 1
-    return max(1, min(3, available))
+        state = json.loads(_builder_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return state == {"jobs": jobs, "registry": registry}
+
+
+def _write_builder_state(jobs: int, registry: str) -> None:
+    path = _builder_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"jobs": jobs, "registry": registry}) + "\n", encoding="utf-8")
+    except OSError:
+        # The builder remains usable when the optional marker cannot be stored.
+        pass
 
 
 def _docker(args: list[str], cwd: str = ".", check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -55,8 +151,12 @@ def _buildkitd_config(jobs: int, registry: str, registry_ca: str | None) -> str:
 
 def _ensure_builder(service: Service, jobs: int, cwd: str) -> str:
     inspect = _docker(["buildx", "inspect", STABLE_BUILDER], cwd=cwd, check=False)
-    if inspect.returncode == 0:
+    registry = service.image_repository.split("/", 1)[0]
+    if inspect.returncode == 0 and _builder_matches(jobs, registry):
         return STABLE_BUILDER
+
+    if inspect.returncode == 0:
+        _docker(["buildx", "rm", "--force", STABLE_BUILDER], cwd=cwd)
 
     # The runner reaches Harbor through its host DNS/network.  BuildKit runs in
     # a container, so keep that container on host networking as well; otherwise
@@ -72,7 +172,6 @@ def _ensure_builder(service: Service, jobs: int, cwd: str) -> str:
             ca_path = Path(registry_ca)
             if not ca_path.is_file():
                 raise BuildError("registry CA file is unavailable")
-        registry = service.image_repository.split("/", 1)[0]
         buildkit_config = tempfile.TemporaryDirectory(prefix="ci-templates-buildkit-")
         config_path = Path(buildkit_config.name) / "buildkitd.toml"
         config_path.write_text(
@@ -81,6 +180,7 @@ def _ensure_builder(service: Service, jobs: int, cwd: str) -> str:
         )
         create_args.extend(["--buildkitd-config", str(config_path)])
         _docker(create_args, cwd=cwd)
+        _write_builder_state(jobs, registry)
     except Exception:
         _docker(["buildx", "rm", "--force", STABLE_BUILDER], cwd=cwd, check=False)
         raise

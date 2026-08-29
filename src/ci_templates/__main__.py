@@ -7,7 +7,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from .changes import affected_services, build_release_context, changed_paths, read_release_context, resolve_revision, write_release_context
+from .changes import affected_services, build_release_context, changed_paths, deploy_changed, deploy_services, read_release_context, release_services, resolve_revision, write_release_context
 from .config import ConfigError, load_config
 from .gitops import sync_snapshot, promote_snapshot, rollback_snapshot
 from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest, promote_candidate
@@ -139,7 +139,17 @@ def main(argv: list[str] | None = None) -> int:
                     args.details_file,
                     build_release_context(config, resolved_base, resolved_head, paths),
                 )
-            print(json.dumps({"paths": paths, "services": list(affected_services(config, paths))}, sort_keys=True))
+            build = list(affected_services(config, paths))
+            deploy = list(deploy_services(config, paths))
+            release = list(release_services(config, paths))
+            print(json.dumps({
+                "paths": paths,
+                "services": release,
+                "build_services": build,
+                "deploy_services": deploy,
+                "release_services": release,
+                "deploy_changed": deploy_changed(config, paths),
+            }, sort_keys=True))
         elif args.command == "versions":
             config = load_config(args.config)
             selected = [service for service in config.services if args.service is None or service.name == args.service]
@@ -225,9 +235,13 @@ def main(argv: list[str] | None = None) -> int:
             config = load_config(args.config)
             selected = {item.strip() for item in args.services.split(",") if item.strip()}
             deployed = [service.name for service in config.services if service.name in selected]
-            if not deployed:
-                raise ConfigError("no affected services selected for summary")
             context = read_release_context(args.changes_file)
+            if not deployed and not any(
+                (bucket.get("paths") or bucket.get("diff"))
+                for bucket in [context.get("shared", {})]
+                if isinstance(bucket, dict)
+            ):
+                raise ConfigError("no affected services or shared changes selected for summary")
             aggregate_version = read_version(Path(args.repo) / config.aggregate_version_file)
             aggregate_tag = aggregate_release_tag(config.aggregate_release_prefix, aggregate_version, cwd=args.repo)
             body = summarize_release_with_deepseek(config.deepseek_model, aggregate_tag, context, deployed, config.release_language)
@@ -239,8 +253,6 @@ def main(argv: list[str] | None = None) -> int:
             config = load_config(args.config)
             selected = {item.strip() for item in args.services.split(",") if item.strip()}
             deployed = [service.name for service in config.services if service.name in selected]
-            if not deployed:
-                raise ConfigError("no affected services selected for release")
             changes_file = args.changes_file or os.environ.get("CI_RELEASE_CHANGES_FILE", "")
             if not changes_file:
                 raise ConfigError("CI_RELEASE_CHANGES_FILE or --changes-file is required before main promotion")
@@ -255,6 +267,12 @@ def main(argv: list[str] | None = None) -> int:
             context_head = context.get("head")
             if context_head and context_head != current_commit:
                 raise ConfigError("release change context does not match the checked-out commit")
+            if not deployed and not any(
+                (bucket.get("paths") or bucket.get("diff"))
+                for bucket in [context.get("shared", {})]
+                if isinstance(bucket, dict)
+            ):
+                raise ConfigError("no affected services or shared changes selected for release")
             aggregate_version = read_version(Path(args.repo) / config.aggregate_version_file)
             aggregate_tag = aggregate_release_tag(config.aggregate_release_prefix, aggregate_version, cwd=args.repo)
             if args.summary_file:
