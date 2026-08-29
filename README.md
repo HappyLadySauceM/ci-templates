@@ -1,23 +1,87 @@
 # CI Templates
 
-This repository contains the reusable Python CI/CD control image used by project workflows.
+本仓库提供组织复用的 Python CI/CD **控制镜像**。通用操作都在镜像里：配置校验、变更服务检测、版本/tag 计算、Harbor 标签、GitOps 快照、Argo 健康等待、冒烟、聚合 DeepSeek 发布摘要，以及锁定 Helm Chart 的审计与 OCI 镜像。项目仓库只保留薄的 `.github/workflows/pipeline.yml` 和项目自有 manifest。
 
-The image owns generic operations: configuration validation, changed-service detection, independent service version/tag calculation, Harbor tag operations, GitOps snapshot copying, Argo health checks, smoke command execution, aggregated DeepSeek functional summaries, and locked Helm chart auditing/mirroring. Project repositories keep only a thin `.github/workflows/pipeline.yml` and project-owned manifests.
+当前版本见 [VERSION](VERSION)。发布到 Harbor 的镜像为：
 
-The control flow intentionally does not scan or sign images. A project must still keep credentials in the runner or deployment secret manager; secrets never belong in JSON, YAML, source, logs, or release metadata. Release summaries consume a bounded, redacted diff context from a temporary file. Commit, branch, workflow, and credential metadata is never sent to DeepSeek or written to a release body.
+```text
+harbor.happyladysauce.local/knowledge-core/ci-templates:vMAJOR.MINOR.PATCH
+```
 
-Projects keep optional service `version_file` values for documentation. A successful promotion pushes only one aggregate project tag (`vMAJOR.MINOR.PATCH`) and creates one GitHub Release whose title is the same version tag. Shared/CI/build changes are summarized once under **Shared changes**; service sections appear only when `services/<svc>` or `deploy/<svc>` business paths changed. Dockerfile-only rebuilds stay in the shared section. The release lists **Affected services**; a root-level deploy-only change is recorded as shared deployment configuration. The root `aggregate_version_file` controls the aggregate tag. Retrying a promotion reuses the aggregate tag and Release when they already target the same commit and refuses conflicting tags. Existing `<aggregate_release_prefix>-vMAJOR.MINOR.PATCH` tags still count when choosing the next patch or retrying a commit that already has a prefixed tag.
+生产 workflow **按 digest pin** 该镜像。`ci-templates-publish` 在推到 `main` 且相关路径变更时，把 `VERSION` 对应的 tag 推到 Harbor；已存在的不可变 tag 会跳过重建。
 
-The workflow should run `changes --base <main-sha> --details-file <runner-temp-file>` before the build and mount that file read-only into `release`. The release command accepts the same path through `--changes-file` or `CI_RELEASE_CHANGES_FILE`; the legacy `CI_RELEASE_METADATA_JSON` input is intentionally unsupported.
+本控制流**不扫描、不签名**镜像。凭据只放在 runner 或部署 Secret 管理器里；密码、token、私钥不得出现在 JSON、YAML、源码、日志或 Release 正文。发布摘要只消费一份有界、已脱敏的 diff 上下文（临时文件）。commit、分支、workflow 和凭据元数据不会发给 DeepSeek，也不会写入 Release。
 
-For a one-time migration from older service Releases, verify their tags first, create the new aggregate Release at the promoted SHA with the change context, then run `gh release delete <legacy-tag> --yes` without `--cleanup-tag`. This removes only the GitHub Release record and preserves the Git tag.
+## 读者地图
 
-Build locally with `PYTHONPATH=src python3 -m unittest discover -s tests -v` and `docker build -t ci-templates:dev .`. The pinned `ci-templates-publish` workflow publishes the version from `VERSION` to Harbor; production workflows should pin that image by digest after the first successful publish.
+| 你是谁 | 先读 |
+| --- | --- |
+| 要理解控制面与 deploy / Harbor / Argo 的关系 | [全景](docs/overview.md) |
+| 要给应用仓库接流水线 | [消费指南](docs/consume.md) |
+| 要查命令或 `CI_PROJECT_CONFIG` 字段 | [CLI 与配置](docs/cli-and-config.md) |
+| 要审计或镜像平台 Chart | [Chart](docs/charts.md)；锁文件在 [deploy](https://github.com/HappyLadySauceM/deploy/blob/main/k3s/charts.lock.yaml) |
+| 要做聚合发布或升级本镜像 | [发布](docs/release.md) |
 
-Image builds reuse a stable Buildx builder named `ci-templates` so BuildKit cache mounts survive across services on the same runner. Compile/build parallelism defaults to 75% of the runner's effective CPUs (affinity and cgroup quota), with a minimum of one worker. Set `BUILD_CPU_PERCENT` to change the ratio; `BUILD_JOBS` is reserved for an explicit, bounded emergency override. BuildKit garbage collection keeps the builder below its configured disk watermarks. Projects may pass a SHA256-checked artifact manifest to `build`; this allows runtime-only Dockerfiles to package binaries produced by the quality job without compiling again.
+GitOps 真源与「谁改哪」见 [deploy 文档](https://github.com/HappyLadySauceM/deploy)。
 
-The `changes` command reports separate `build_services`, `deploy_services`, and `release_services` fields. A deploy-only change updates its GitOps snapshot and runs deployment validation without rebuilding an image. Snapshot pushes retry a moved GitOps branch by cloning the latest commit and replaying the project-scoped snapshot; force-push remains forbidden.
+## 命令地图
 
-For aggregate releases, `summarize --changes-file ... --services ... --output ...` performs one bounded DeepSeek request and writes a reusable release body. `release --summary-file ...` consumes that body without making another model request.
+`ENTRYPOINT` 是 `ci-templates`。workflow 里典型调用：
 
-`charts-check` downloads every chart declared in a version 1 YAML manifest, verifies its source SHA256, applies only explicitly listed template removals or repository-owned replacements, renders twice, and rejects nondeterministic output, duplicate resources, or any rendered `Secret`. `charts-mirror` runs the same gates before pushing the packaged chart to the configured OCI repository and refreshing optional vendored charts. Registry credentials are supplied through Helm's runtime registry configuration; they are never fields in the manifest.
+```text
+docker run --rm --network host \
+  -v "$GITHUB_WORKSPACE:/workspace" \
+  -e CI_PROJECT_CONFIG_JSON \
+  -w /workspace "$CI_IMAGE" <command>
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `validate` | 加载流水线配置 |
+| `changes` | 输出 `build_services` / `deploy_services` / `release_services` |
+| `versions` | 读服务 `version_file` 并计算下一 patch tag |
+| `snapshot` / `promote-snapshot` / `rollback-snapshot` | 本地复制或推送到 deploy 仓库 |
+| `build` / `prewarm` / `promote-candidate` / `cleanup-candidate` | 镜像构建与 Harbor 标签 |
+| `cleanup-previous` / `restore-previous` | `:dev` / `:previous` 生命周期 |
+| `argo-wait` | 等待 Application Synced + Healthy |
+| `smoke` | 项目 `smoke_command` 或集群内置冒烟 |
+| `summarize` / `release` | 一次模型摘要 + 聚合 GitHub Release |
+| `status` | 写 GitHub commit status |
+| `charts-check` / `charts-mirror` | 锁定 Chart 审计与 OCI 推送 |
+
+完整参数与配置 schema 见 [CLI 与配置](docs/cli-and-config.md)。
+
+`changes` 必须在构建前用 `--base <main-sha> --details-file <runner-temp-file>` 跑一次，并把该文件只读挂进后续的 `summarize` / `release`。`release` 通过 `--changes-file` 或 `CI_RELEASE_CHANGES_FILE` 读取同一路径；旧的 `CI_RELEASE_METADATA_JSON` **不再支持**。
+
+只改 `deploy/<service>/` 时，流水线更新 GitOps 快照并做部署校验，不重建镜像。快照推送在远端分支已前进时会克隆最新提交并重放本项目范围内的快照；**禁止 force-push**。
+
+## 聚合发布（摘要）
+
+成功提升只推送一个项目级 tag：`vMAJOR.MINOR.PATCH`，并创建一个标题相同的 GitHub Release。根目录 `aggregate_version_file` 控制该版本。服务自己的 `version_file` 可保留作文档，不再各自发 Release。
+
+- 共享 / CI / 构建变更汇总在 **Shared changes**
+- 只有 `services/<svc>` 或 `deploy/<svc>` 业务路径变更时才出现服务章节
+- 只改 Dockerfile 的重建归入 Shared
+- Release 列出 **Affected services**
+- 仓库根级、仅部署相关的变更记为共享部署配置
+
+同 commit 重试会复用已指向该 commit 的聚合 tag 与 Release，冲突 tag 会被拒绝。历史上的 `<aggregate_release_prefix>-vMAJOR.MINOR.PATCH` 在选下一 patch 或重试时仍计入。
+
+`summarize --changes-file ... --services ... --output ...` 只发一次有界 DeepSeek 请求并写出 Release 正文；`release --summary-file ...` 复用该文件，不再请求模型。
+
+从旧的按服务 Release 做一次性迁移：先核对旧 tag，在已提升的 SHA 上用变更上下文创建新的聚合 Release，再执行 `gh release delete <legacy-tag> --yes`（不要加 `--cleanup-tag`），只删 GitHub Release 记录、保留 Git tag。细节见 [发布](docs/release.md)。
+
+## 构建并行与制品
+
+镜像构建复用名为 `ci-templates` 的稳定 Buildx builder，以便同一 runner 上跨服务保留 BuildKit cache。编译并行默认是 runner 有效 CPU（亲和性与 cgroup 配额）的 75%，至少 1。用 `BUILD_CPU_PERCENT` 调整比例；`BUILD_JOBS` 仅作有界紧急覆盖。BuildKit GC 按配置水位回收。
+
+`build` 可接收一份经 SHA256 校验的 artifact manifest，让只负责打包的 Dockerfile 使用质量作业已经编好的二进制，而不再编译一次。
+
+## 本地验证
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+docker build -t ci-templates:dev .
+```
+
+需要 Python 3.10+。镜像内还包含 git、jq、docker CLI / buildx、skopeo、kubectl、helm。
