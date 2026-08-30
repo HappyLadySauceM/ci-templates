@@ -60,6 +60,30 @@ push dev
 | `BUILD_CPU_PERCENT` | 构建并行比例，默认 75 |
 | `CI_RELEASE_CHANGES_FILE` | 未传 `--changes-file` 时的 release 上下文 |
 
+不要把 `DOCKER_CONFIG` 挂到 `/root/.docker`。镜像内 `/root` 是 `700`，容器一旦以 runner UID 运行就读不到。挂到 `/ci/docker`，并设 `DOCKER_CONFIG=/ci/docker`。
+
+## 容器 UID 与 runner 路径
+
+控制镜像没有 `USER`，默认是 root。自托管 runner 复用 `_work` 时，root 写入的 `.git/objects` 会让后续 `actions/checkout` 失败。每次调用必须对齐 **当前 runner 进程** 的 UID/GID，不要写死某台机器的数字：
+
+```bash
+socket="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+socket="${socket#unix://}"
+ci_run() {
+  docker run --rm --network host \
+    --user "$(id -u):$(id -g)" \
+    --group-add "$(stat -c '%g' "$socket")" \
+    -e HOME="${RUNNER_TEMP:-/tmp}" \
+    "$@"
+}
+```
+
+- `--user "$(id -u):$(id -g)"`：换机器、以后迁 rootless 都成立
+- `--group-add "$(stat -c '%g' "$socket")"`：系统 Docker 的 `root:docker` socket；rootless 时 gid 就是 runner 自己
+- `-e HOME=...`：容器内没有对应 passwd 条目时，git / Python 仍有可写家目录
+- 缓存目录：`"$(cd "$GITHUB_WORKSPACE/../.." && pwd)/_cache/knowledge-core"`，不要写死 `/opt/actions-runner`
+- Go 工具：`${RUNNER_TOOL_CACHE}/knowledge-core-go-tools`
+
 密钥来源是 GitHub environment / Actions secrets，或 runner 上的受控文件。不要把它们写进配置 JSON、锁文件、日志或 Release。
 
 当前 Knowledge-Core 使用 GitHub App token 访问 `Knowledge-Core` 与 `deploy`，把该 token 同时当作 `GITOPS_TOKEN` 与 `GITHUB_TOKEN`。kubeconfig 来自节点 `/etc/rancher/k3s/k3s.yaml` 或 `K3S_RELEASE_KUBECONFIG`。仓库不保存 token 明文。
@@ -81,7 +105,7 @@ Runner 标签与 deploy 宿主机约定一致：`self-hosted`、`Linux`、`X64`�
 PYTHONPATH=src python3 -m ci_templates validate --config /path/to/ci-pipeline.json
 PYTHONPATH=src python3 -m ci_templates changes --config /path/to/ci-pipeline.json --base origin/main
 docker build -t ci-templates:dev .
-docker run --rm -v "$PWD:/workspace" -e CI_PROJECT_CONFIG_JSON='...' ci-templates:dev changes --base HEAD~1
+docker run --rm --user "$(id -u):$(id -g)" -e HOME="${TMPDIR:-/tmp}" -v "$PWD:/workspace" -e CI_PROJECT_CONFIG_JSON='...' ci-templates:dev changes --base HEAD~1
 ```
 
 向 GitOps 或 Harbor 推送的命令不要在无凭据的笔记本上对生产仓库执行。
