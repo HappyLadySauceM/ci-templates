@@ -74,6 +74,8 @@ ci_run() {
     --user "$(id -u):$(id -g)" \
     --group-add "$(stat -c '%g' "$socket")" \
     -e HOME="${RUNNER_TEMP:-/tmp}" \
+    -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
+    -e http_proxy -e https_proxy -e no_proxy \
     "$@"
 }
 ```
@@ -81,6 +83,7 @@ ci_run() {
 - `--user "$(id -u):$(id -g)"`：换机器、以后迁 rootless 都成立
 - `--group-add "$(stat -c '%g' "$socket")"`：系统 Docker 的 `root:docker` socket；rootless 时 gid 就是 runner 自己
 - `-e HOME=...`：容器内没有对应 passwd 条目时，git / Python 仍有可写家目录
+- `-e HTTP_PROXY` 等：从 runner 环境透传宿主机 sing-box 代理；未设置时（GitHub-hosted）为空，不影响直连
 - 缓存目录：`"$(cd "$GITHUB_WORKSPACE/../.." && pwd)/_cache/knowledge-core"`，不要写死 `/opt/actions-runner`
 - Go 工具：`${RUNNER_TOOL_CACHE}/knowledge-core-go-tools`
 
