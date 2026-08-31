@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -18,7 +19,12 @@ class BuildError(RuntimeError):
 
 
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
-STABLE_BUILDER = "ci-templates"
+DEFAULT_BUILDER_NAME = "ci-templates"
+# Buildx names are also used as Docker object names and as marker filenames.
+# Keep the accepted alphabet deliberately narrow so an environment variable
+# cannot escape the marker directory or alter the command shape.
+_BUILDER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
+STABLE_BUILDER = DEFAULT_BUILDER_NAME
 DEFAULT_CPU_PERCENT = 75
 _BUILDER_STATE_FILE = "ci-templates-resource.json"
 
@@ -100,26 +106,71 @@ def build_jobs() -> int:
     return max(1, available * _cpu_percent() // 100)
 
 
-def _builder_state_path() -> Path:
+def _validated_builder_name(value: str) -> str:
+    if not _BUILDER_NAME_RE.fullmatch(value):
+        raise BuildError("CI_BUILDER_NAME must contain 1-63 letters, digits, '.', '_' or '-'")
+    return value
+
+
+def _configured_builder_name() -> str:
+    value = os.environ.get("CI_BUILDER_NAME", DEFAULT_BUILDER_NAME)
+    return _validated_builder_name(value)
+
+
+def _builder_state_path(builder_name: str | None = None) -> Path:
+    name = _configured_builder_name() if builder_name is None else _validated_builder_name(builder_name)
+    # Keep the historical default marker path so existing runners reuse their
+    # ci-templates builder after upgrading. Custom names get separate markers.
+    filename = _BUILDER_STATE_FILE if name == DEFAULT_BUILDER_NAME else f"{name}-resource.json"
     root = os.environ.get("BUILDX_CONFIG", "").strip()
     if root:
-        return Path(root) / _BUILDER_STATE_FILE
-    return Path.home() / ".docker" / "buildx" / _BUILDER_STATE_FILE
+        return Path(root) / filename
+    return Path.home() / ".docker" / "buildx" / filename
 
 
-def _builder_matches(jobs: int, registry: str) -> bool:
+def _builder_matches(
+    jobs: int,
+    registry: str,
+    *,
+    builder_name: str | None = None,
+    registry_ca_fingerprint: str | None = None,
+) -> bool:
+    name = _configured_builder_name() if builder_name is None else _validated_builder_name(builder_name)
     try:
-        state = json.loads(_builder_state_path().read_text(encoding="utf-8"))
+        state = json.loads(_builder_state_path(name).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return state == {"jobs": jobs, "registry": registry}
+    return state == {
+        "builder": name,
+        "jobs": jobs,
+        "registry": registry,
+        "registry_ca_sha256": registry_ca_fingerprint,
+    }
 
 
-def _write_builder_state(jobs: int, registry: str) -> None:
-    path = _builder_state_path()
+def _write_builder_state(
+    jobs: int,
+    registry: str,
+    *,
+    builder_name: str | None = None,
+    registry_ca_fingerprint: str | None = None,
+) -> None:
+    name = _configured_builder_name() if builder_name is None else _validated_builder_name(builder_name)
+    path = _builder_state_path(name)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"jobs": jobs, "registry": registry}) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "builder": name,
+                    "jobs": jobs,
+                    "registry": registry,
+                    "registry_ca_sha256": registry_ca_fingerprint,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     except OSError:
         # The builder remains usable when the optional marker cannot be stored.
         pass
@@ -149,29 +200,48 @@ def _buildkitd_config(jobs: int, registry: str, registry_ca: str | None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _registry_ca_fingerprint(registry_ca: str | None) -> str | None:
+    if not registry_ca:
+        return None
+    ca_path = Path(registry_ca)
+    if not ca_path.is_file():
+        raise BuildError("registry CA file is unavailable")
+    digest = hashlib.sha256()
+    try:
+        with ca_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise BuildError("registry CA file is unavailable") from exc
+    return digest.hexdigest()
+
+
 def _ensure_builder(service: Service, jobs: int, cwd: str) -> str:
-    inspect = _docker(["buildx", "inspect", STABLE_BUILDER], cwd=cwd, check=False)
+    builder_name = _configured_builder_name()
     registry = service.image_repository.split("/", 1)[0]
-    if inspect.returncode == 0 and _builder_matches(jobs, registry):
-        return STABLE_BUILDER
+    registry_ca = os.environ.get("CI_REGISTRY_CA_FILE", "").strip() or None
+    registry_ca_fingerprint = _registry_ca_fingerprint(registry_ca)
+    inspect = _docker(["buildx", "inspect", builder_name], cwd=cwd, check=False)
+    if inspect.returncode == 0 and _builder_matches(
+        jobs,
+        registry,
+        builder_name=builder_name,
+        registry_ca_fingerprint=registry_ca_fingerprint,
+    ):
+        return builder_name
 
     if inspect.returncode == 0:
-        _docker(["buildx", "rm", "--force", STABLE_BUILDER], cwd=cwd)
+        _docker(["buildx", "rm", "--force", builder_name], cwd=cwd)
 
     # The runner reaches Harbor through its host DNS/network.  BuildKit runs in
     # a container, so keep that container on host networking as well; otherwise
     # private registry names resolve on the host but not inside BuildKit.
     create_args = [
         "buildx", "create", "--driver", "docker-container",
-        "--driver-opt", "network=host", "--name", STABLE_BUILDER,
+        "--driver-opt", "network=host", "--name", builder_name,
     ]
-    registry_ca = os.environ.get("CI_REGISTRY_CA_FILE", "").strip()
     buildkit_config: tempfile.TemporaryDirectory[str] | None = None
     try:
-        if registry_ca:
-            ca_path = Path(registry_ca)
-            if not ca_path.is_file():
-                raise BuildError("registry CA file is unavailable")
         buildkit_config = tempfile.TemporaryDirectory(prefix="ci-templates-buildkit-")
         config_path = Path(buildkit_config.name) / "buildkitd.toml"
         config_path.write_text(
@@ -180,14 +250,19 @@ def _ensure_builder(service: Service, jobs: int, cwd: str) -> str:
         )
         create_args.extend(["--buildkitd-config", str(config_path)])
         _docker(create_args, cwd=cwd)
-        _write_builder_state(jobs, registry)
+        _write_builder_state(
+            jobs,
+            registry,
+            builder_name=builder_name,
+            registry_ca_fingerprint=registry_ca_fingerprint,
+        )
     except Exception:
-        _docker(["buildx", "rm", "--force", STABLE_BUILDER], cwd=cwd, check=False)
+        _docker(["buildx", "rm", "--force", builder_name], cwd=cwd, check=False)
         raise
     finally:
         if buildkit_config is not None:
             buildkit_config.cleanup()
-    return STABLE_BUILDER
+    return builder_name
 
 
 def _validate_artifact_manifest(service: Service, manifest: str | None, cwd: str) -> None:
@@ -220,6 +295,8 @@ def build_service(
     preserve_previous: bool = True,
     artifact_manifest: str | None = None,
 ) -> str:
+    # Validate the builder selector before any pull/tag/push side effects.
+    _configured_builder_name()
     image = f"{service.image_repository}:{tag}"
     cache = f"{service.image_repository}:buildcache"
     jobs = build_jobs()

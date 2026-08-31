@@ -58,6 +58,8 @@ push dev
 | `DEEPSEEK_API_KEY` | `summarize` |
 | `KUBECONFIG` | `argo-wait` / `smoke` |
 | `BUILD_CPU_PERCENT` | 构建并行比例，默认 75 |
+| `CI_BUILDER_NAME` | 可选的 Buildx builder 名；默认 `ci-templates`，不同名称使用独立状态 |
+| `CI_REGISTRY_CA_FILE` | 可选的 Harbor CA 文件；内容指纹变化会触发 builder 重建 |
 | `CI_RELEASE_CHANGES_FILE` | 未传 `--changes-file` 时的 release 上下文 |
 
 不要把 `DOCKER_CONFIG` 挂到 `/root/.docker`。镜像内 `/root` 是 `700`，容器一旦以 runner UID 运行就读不到。挂到 `/ci/docker`，并设 `DOCKER_CONFIG=/ci/docker`。
@@ -95,12 +97,12 @@ ci_run() {
 
 ```yaml
 env:
-  CI_IMAGE: harbor.happyladysauce.local/knowledge-core/ci-templates:v1.1.11@sha256:...
+  CI_IMAGE: harbor.happyladysauce.local/knowledge-core/ci-templates:v1.1.12@sha256:...
 ```
 
 本仓库 `ci-templates-publish` 成功后会在 job summary 打出 `image@digest`。消费方必须开 PR 更新 `CI_IMAGE`。未 pin digest 的 tag 不得用于生产 workflow。
 
-Runner 标签与 deploy 宿主机约定一致：`self-hosted`、`Linux`、`X64`、`devops`。不要在该 runner 上跑全局 `docker image prune`；只清理名为 `ci-templates` 的 Buildx 缓存与本项目状态目录。
+Runner 标签与 deploy 宿主机约定一致：`self-hosted`、`Linux`、`X64`、`devops`。不要在该 runner 上跑全局 `docker image prune`；只清理由 `CI_BUILDER_NAME` 指定的 Buildx 缓存与本项目状态目录。builder 名必须是安全的 1–63 字符字母数字串，可包含 `.`, `_`, `-`；不要把凭据或路径放入其中。
 
 ## 本地试跑
 

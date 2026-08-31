@@ -73,7 +73,7 @@ docker run --rm --network host \
 
 ## 构建并行与制品
 
-镜像构建复用名为 `ci-templates` 的稳定 Buildx builder，以便同一 runner 上跨服务保留 BuildKit cache。编译并行默认是 runner 有效 CPU（亲和性与 cgroup 配额）的 75%，至少 1。用 `BUILD_CPU_PERCENT` 调整比例；`BUILD_JOBS` 仅作有界紧急覆盖。BuildKit GC 按配置水位回收。
+镜像构建默认复用名为 `ci-templates` 的稳定 Buildx builder，以便同一 runner 上跨服务保留 BuildKit cache。需要在同一 Docker daemon 上隔离不同流水线时，可通过 `CI_BUILDER_NAME` 指定仅含字母、数字、`.`, `_`, `-` 且不超过 63 个字符的 builder 名；每个名称使用独立的资源 marker。未设置时保持 `ci-templates` 及其原有 marker 路径不变。编译并行默认是 runner 有效 CPU（亲和性与 cgroup 配额）的 75%，至少 1。用 `BUILD_CPU_PERCENT` 调整比例；`BUILD_JOBS` 仅作有界紧急覆盖。BuildKit GC 按配置水位回收。设置 `CI_REGISTRY_CA_FILE` 时，marker 只保存 CA 文件的 SHA-256 指纹；CA 内容变化会受控重建 builder，不会写入 marker。
 
 `build` 可接收一份经 SHA256 校验的 artifact manifest，让只负责打包的 Dockerfile 使用质量作业已经编好的二进制，而不再编译一次。
 

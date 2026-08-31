@@ -23,7 +23,18 @@ from ci_templates.gitops import _git, promote_snapshot, rollback_snapshot, updat
 from ci_templates.release import render_aggregate_release, summarize_release_with_deepseek
 from ci_templates.versions import aggregate_release_tag, service_tag
 from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_path, _validate_rendered, load_chart_manifest
-from ci_templates.build import BuildError, _docker, _validate_artifact_manifest, build_jobs, build_service, image_digest
+from ci_templates.build import (
+    BuildError,
+    _builder_state_path,
+    _configured_builder_name,
+    _docker,
+    _ensure_builder,
+    _registry_ca_fingerprint,
+    _validate_artifact_manifest,
+    build_jobs,
+    build_service,
+    image_digest,
+)
 from ci_templates.argocd import (
     ArgoError,
     _has_revision,
@@ -647,8 +658,89 @@ class CiTemplatesTest(unittest.TestCase):
             self.assertIn("newTag: old", rolled_back)
             self.assertNotIn(f"digest: {digest}", rolled_back)
 
+    def test_builder_name_defaults_and_rejects_unsafe_values(self):
+        with patch.dict("ci_templates.build.os.environ", {}, clear=True):
+            self.assertEqual(_configured_builder_name(), "ci-templates")
+
+        with patch.dict("ci_templates.build.os.environ", {"CI_BUILDER_NAME": "kapok-ci"}, clear=True):
+            self.assertEqual(_configured_builder_name(), "kapok-ci")
+
+        for value in ("", "/tmp/builder", "builder name", "-builder", "a" * 64):
+            with self.subTest(value=value), patch.dict(
+                "ci_templates.build.os.environ", {"CI_BUILDER_NAME": value}, clear=True
+            ):
+                with self.assertRaisesRegex(BuildError, "CI_BUILDER_NAME"):
+                    _configured_builder_name()
+
+    def test_builder_state_paths_are_isolated_but_default_path_is_compatible(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "ci_templates.build.os.environ", {"BUILDX_CONFIG": directory}, clear=True
+        ):
+            self.assertEqual(_builder_state_path(), Path(directory) / "ci-templates-resource.json")
+            self.assertEqual(_builder_state_path("kapok-ci"), Path(directory) / "kapok-ci-resource.json")
+
     @patch("ci_templates.build._docker")
-    def test_build_preserves_existing_dev_before_replacement(self, docker):
+    def test_invalid_builder_name_is_rejected_before_registry_side_effects(self, docker):
+        with patch.dict("ci_templates.build.os.environ", {"CI_BUILDER_NAME": "unsafe/name"}, clear=True):
+            with self.assertRaisesRegex(BuildError, "CI_BUILDER_NAME"):
+                build_service(config().services[0])
+        docker.assert_not_called()
+
+    @patch("ci_templates.build._docker")
+    def test_builder_marker_tracks_ca_fingerprint_without_sensitive_data(self, docker):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ca_path = root / "registry-ca.crt"
+            ca_path.write_text("first CA\n", encoding="utf-8")
+            environment = {
+                "BUILDX_CONFIG": str(root / "buildx"),
+                "CI_BUILDER_NAME": "kapok-ci",
+                "CI_REGISTRY_CA_FILE": str(ca_path),
+            }
+            with patch.dict("ci_templates.build.os.environ", environment, clear=True):
+                docker.side_effect = [
+                    subprocess.CompletedProcess([], 1),  # builder does not exist
+                    subprocess.CompletedProcess([], 0),  # create
+                ]
+                self.assertEqual(_ensure_builder(config().services[0], 1, "."), "kapok-ci")
+
+                marker_path = _builder_state_path("kapok-ci")
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                self.assertEqual(marker["builder"], "kapok-ci")
+                self.assertEqual(marker["registry"], "org")
+                self.assertEqual(marker["registry_ca_sha256"], _registry_ca_fingerprint(str(ca_path)))
+                marker_text = marker_path.read_text(encoding="utf-8")
+                self.assertNotIn(str(ca_path), marker_text)
+                self.assertNotIn("first CA", marker_text)
+
+                ca_path.write_text("second CA\n", encoding="utf-8")
+                docker.side_effect = [
+                    subprocess.CompletedProcess([], 0),  # existing builder
+                    subprocess.CompletedProcess([], 0),  # remove stale builder
+                    subprocess.CompletedProcess([], 0),  # recreate
+                ]
+                self.assertEqual(_ensure_builder(config().services[0], 1, "."), "kapok-ci")
+
+        self.assertEqual(
+            docker.call_args_list[0],
+            call(["buildx", "inspect", "kapok-ci"], cwd=".", check=False),
+        )
+        self.assertEqual(
+            docker.call_args_list[2],
+            call(["buildx", "inspect", "kapok-ci"], cwd=".", check=False),
+        )
+        self.assertEqual(
+            docker.call_args_list[3],
+            call(["buildx", "rm", "--force", "kapok-ci"], cwd="."),
+        )
+
+    @patch("ci_templates.build._builder_matches", return_value=True)
+    @patch("ci_templates.build._docker")
+    def test_build_preserves_existing_dev_before_replacement(self, docker, builder_matches):
         docker.side_effect = [
             subprocess.CompletedProcess([], 0),  # pull
             subprocess.CompletedProcess([], 0),  # tag
@@ -677,8 +769,9 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertIn(f"BUILD_JOBS={build_jobs()}", build_args)
         self.assertFalse(any(args.args[0][:2] == ["buildx", "rm"] for args in docker.call_args_list))
 
+    @patch("ci_templates.build._builder_matches", return_value=True)
     @patch("ci_templates.build._docker")
-    def test_first_build_does_not_require_previous_image(self, docker):
+    def test_first_build_does_not_require_previous_image(self, docker, builder_matches):
         docker.side_effect = [
             subprocess.CompletedProcess([], 1),  # pull miss
             subprocess.CompletedProcess([], 0),  # inspect exists
@@ -692,8 +785,9 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertEqual(build_args[:4], ["buildx", "build", "--builder", "ci-templates"])
         self.assertIn("--push", build_args)
 
+    @patch("ci_templates.build._builder_matches", return_value=True)
     @patch("ci_templates.build._docker")
-    def test_failed_build_keeps_stable_builder(self, docker):
+    def test_failed_build_keeps_stable_builder(self, docker, builder_matches):
         docker.side_effect = [
             subprocess.CompletedProcess([], 1),  # pull miss
             subprocess.CompletedProcess([], 0),  # inspect exists
