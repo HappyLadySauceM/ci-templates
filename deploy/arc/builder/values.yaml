@@ -9,7 +9,9 @@ controllerServiceAccount:
   namespace: arc-system
   name: gha-runner-scale-set-controller-gha-rs-controller
 minRunners: 0
-maxRunners: 4
+# Emergency single-node canary cap. Restore to 4 after dedicated CI workers
+# are labelled and tainted as documented in deploy/docs/ci-runners.md.
+maxRunners: 1
 imagePullSecrets:
   - name: arc-registry-pull
 containerMode: {}

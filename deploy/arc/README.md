@@ -7,9 +7,12 @@ GitHub App Secret, private-registry pull secret, node labels and cluster-local
 policy; no credential belongs here.
 
 The controller is installed in `arc-system`. Runner pods are split between
-`arc-runners-standard` (direct runner pods, max eight) and
-`arc-runners-builder` (privileged Docker-in-Docker, max four). The two pools
-must be scheduled only on nodes labelled `workload.happyladysauce.local/ci=true`.
+`arc-runners-standard` (direct runner pods, target max eight) and
+`arc-runners-builder` (privileged Docker-in-Docker, target max four). During
+the single-control-plane canary the checked-in emergency caps are two and one;
+restore the target limits only after dedicated CI workers are available. The
+two pools must be scheduled only on nodes labelled
+`workload.happyladysauce.local/ci=true`.
 
 Before enabling the ApplicationSet, the deploy repository must contain the
 SOPS-managed `arc-github-app` Secret in both runner namespaces. Its data keys
