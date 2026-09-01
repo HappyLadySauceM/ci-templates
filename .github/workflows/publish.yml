@@ -28,7 +28,7 @@ env:
 
 jobs:
   publish:
-    runs-on: [self-hosted, Linux, X64, hls-builder]
+    runs-on: hls-builder
     timeout-minutes: 45
     environment: release
     steps:
