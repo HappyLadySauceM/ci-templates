@@ -52,6 +52,13 @@ template:
         securityContext:
           runAsUser: 0
           runAsGroup: 0
+        resources:
+          requests:
+            cpu: 500m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
         volumeMounts:
           - name: dind-externals
             mountPath: /home/runner/tmpDir
