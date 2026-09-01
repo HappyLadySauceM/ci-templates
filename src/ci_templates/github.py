@@ -75,22 +75,44 @@ def _git_environment() -> dict[str, str]:
     return env
 
 
-def _configure_identity(cwd: str, env: dict[str, str]) -> None:
-    subprocess.run(["git", "config", "user.name", "happyladysauce-ci"], cwd=cwd, check=True, env=env)
-    subprocess.run(["git", "config", "user.email", "happyladysauce-ci@noreply.local"], cwd=cwd, check=True, env=env)
+def _configure_identity(
+    cwd: str,
+    env: dict[str, str],
+    name: str = "happyladysauce-ci",
+    email: str = "happyladysauce-ci@noreply.local",
+) -> None:
+    subprocess.run(["git", "config", "user.name", name], cwd=cwd, check=True, env=env)
+    subprocess.run(["git", "config", "user.email", email], cwd=cwd, check=True, env=env)
 
 
-def fast_forward_main(cwd: str = ".") -> None:
+def fast_forward_main(
+    cwd: str = ".",
+    *,
+    branch: str = "main",
+    development_branch: str = "dev",
+    identity_name: str = "happyladysauce-ci",
+    identity_email: str = "happyladysauce-ci@noreply.local",
+) -> None:
     env = _git_environment()
-    _configure_identity(cwd, env)
-    subprocess.run(["git", "fetch", "origin", "main", "dev"], cwd=cwd, check=True, env=env)
-    subprocess.run(["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd=cwd, check=True, env=env)
-    subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=cwd, check=True, env=env)
+    _configure_identity(cwd, env, identity_name, identity_email)
+    fetch_branches = ["origin", branch]
+    if development_branch != branch:
+        fetch_branches.append(development_branch)
+    subprocess.run(["git", "fetch", *fetch_branches], cwd=cwd, check=True, env=env)
+    subprocess.run(["git", "merge-base", "--is-ancestor", f"origin/{branch}", "HEAD"], cwd=cwd, check=True, env=env)
+    subprocess.run(["git", "push", "origin", f"HEAD:{branch}"], cwd=cwd, check=True, env=env)
 
 
-def create_and_push_tag(tag: str, message: str, cwd: str = ".") -> None:
+def create_and_push_tag(
+    tag: str,
+    message: str,
+    cwd: str = ".",
+    *,
+    identity_name: str = "happyladysauce-ci",
+    identity_email: str = "happyladysauce-ci@noreply.local",
+) -> None:
     env = _git_environment()
-    _configure_identity(cwd, env)
+    _configure_identity(cwd, env, identity_name, identity_email)
     existing = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{}}"],
         cwd=cwd,

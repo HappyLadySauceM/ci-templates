@@ -1,0 +1,49 @@
+# Values for actions-runner-controller/gha-runner-scale-set.
+githubConfigUrl: https://github.com/HappyLadySauceM
+githubConfigSecret: arc-github-app
+runnerGroup: happyladysauce-ci
+runnerScaleSetName: hls-standard
+scaleSetLabels:
+  - hls-standard
+controllerServiceAccount:
+  namespace: arc-system
+  name: gha-runner-scale-set-controller-gha-rs-controller
+minRunners: 1
+maxRunners: 8
+imagePullSecrets:
+  - name: arc-registry-pull
+containerMode: {}
+template:
+  metadata:
+    labels:
+      workload.happyladysauce.local/pool: standard
+  spec:
+    serviceAccountName: hls-standard-runner
+    nodeSelector:
+      workload.happyladysauce.local/ci: "true"
+    tolerations:
+      - key: workload.happyladysauce.local/ci
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+    securityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    containers:
+      - name: runner
+        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.333.0
+        imagePullPolicy: IfNotPresent
+        command: ["/home/runner/run.sh"]
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: [ALL]

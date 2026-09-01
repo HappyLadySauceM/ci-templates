@@ -10,7 +10,7 @@ from pathlib import Path
 from .changes import affected_services, build_release_context, changed_paths, deploy_changed, deploy_services, read_release_context, release_services, resolve_revision, write_release_context
 from .config import ConfigError, load_config
 from .gitops import sync_snapshot, promote_snapshot, rollback_snapshot
-from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest, promote_candidate
+from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest
 from .argocd import wait_applications, wait_targets
 from .smoke import run as run_smoke, run_kubernetes
 from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--tag", default="dev")
     build.add_argument("--artifact-manifest", default=None)
     build.add_argument("--preserve-previous", action="store_true")
+    build.add_argument("--reuse-existing", action="store_true")
 
     cleanup = subparsers.add_parser("cleanup-previous")
     cleanup.add_argument("--config", default=None)
@@ -112,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--sha", required=True)
     status.add_argument("--state", required=True, choices=("pending", "success", "failure", "error"))
     status.add_argument("--description", required=True)
-    status.add_argument("--context", default="knowledge-core/smoke")
+    status.add_argument("--context", default=None)
     status.add_argument("--target-url", default="")
 
     charts_check = subparsers.add_parser("charts-check")
@@ -165,11 +166,21 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "promote-snapshot":
             config = load_config(args.config)
             overrides = json.loads(os.environ.get("CI_GITOPS_IMAGE_OVERRIDES_JSON", "{}"))
-            revision, base_revision = promote_snapshot(args.deploy_source, config.gitops_repo, config.gitops_path, config.gitops_kustomization, config.gitops_branch, args.source_sha, overrides)
+            revision, base_revision = promote_snapshot(
+                args.deploy_source,
+                config.gitops_repo,
+                config.gitops_path,
+                config.gitops_kustomization,
+                config.gitops_branch,
+                args.source_sha,
+                overrides,
+                identity_name=config.git_identity_name,
+                identity_email=config.git_identity_email,
+            )
             print(json.dumps({"gitops_revision": revision, "gitops_base_revision": base_revision}, sort_keys=True))
         elif args.command == "rollback-snapshot":
             config = load_config(args.config)
-            print(json.dumps({"gitops_revision": rollback_snapshot(config.gitops_repo, config.gitops_branch, args.revision)}, sort_keys=True))
+            print(json.dumps({"gitops_revision": rollback_snapshot(config.gitops_repo, config.gitops_branch, args.revision, identity_name=config.git_identity_name, identity_email=config.git_identity_email)}, sort_keys=True))
         elif args.command in {"build", "cleanup-previous"}:
             config = load_config(args.config)
             service = next((item for item in config.services if item.name == args.service), None)
@@ -182,17 +193,24 @@ def main(argv: list[str] | None = None) -> int:
                     cwd=args.repo,
                     preserve_previous=args.preserve_previous,
                     artifact_manifest=args.artifact_manifest,
+                    reuse_existing=args.reuse_existing,
+                    active_tag=config.active_image_tag,
+                    previous_tag=config.previous_image_tag,
+                    cache_tag=config.cache_image_tag,
+                    buildkit_reserved_space=config.buildkit_reserved_space,
+                    buildkit_max_used_space=config.buildkit_max_used_space,
+                    buildkit_min_free_space=config.buildkit_min_free_space,
                 )
                 print(json.dumps({"service": service.name, "kustomize_name": service.kustomize_name, "image": image, "digest": image_digest(image, cwd=args.repo)}, sort_keys=True))
             else:
-                discard_previous(service, cwd=args.repo)
-                delete_previous(service, config.harbor_registry)
+                discard_previous(service, cwd=args.repo, active_tag=config.active_image_tag, previous_tag=config.previous_image_tag)
+                delete_previous(service, config.harbor_registry, previous_tag=config.previous_image_tag)
         elif args.command == "restore-previous":
             config = load_config(args.config)
             service = next((item for item in config.services if item.name == args.service), None)
             if service is None:
                 raise ConfigError(f"unknown service: {args.service}")
-            restore_previous(service, cwd=args.repo)
+            restore_previous(service, cwd=args.repo, active_tag=config.active_image_tag, previous_tag=config.previous_image_tag)
         elif args.command == "cleanup-candidate":
             config = load_config(args.config)
             service = next((item for item in config.services if item.name == args.service), None)
@@ -204,8 +222,10 @@ def main(argv: list[str] | None = None) -> int:
             service = next((item for item in config.services if item.name == args.service), None)
             if service is None:
                 raise ConfigError(f"unknown service: {args.service}")
-            promote_candidate(service, args.tag, cwd=args.repo)
-            print(json.dumps({"service": service.name, "tag": args.tag}, sort_keys=True))
+            source = ImageRef.parse(f"{service.image_repository}:{args.tag}")
+            destination = ImageRef.parse(f"{service.image_repository}:{config.active_image_tag}")
+            digest = HarborClient(config.harbor_registry).promote_tag(source, destination)
+            print(json.dumps({"service": service.name, "tag": args.tag, "active_tag": destination.tag, "digest": digest}, sort_keys=True))
         elif args.command == "argo-wait":
             config = load_config(args.config)
             if not config.argocd_server:
@@ -219,18 +239,29 @@ def main(argv: list[str] | None = None) -> int:
                 missing = [name for name in selected if name not in {service.name for service in services}]
                 if missing:
                     raise ConfigError(f"unknown service: {', '.join(missing)}")
-                targets = wait_targets(services, overrides)
+                targets = wait_targets(services, overrides, config.application_suffix)
             else:
                 if not config.argocd_application:
                     raise ConfigError("argocd_server and argocd_application are required")
                 targets = {config.argocd_application: ()}
-            wait_applications(config.argocd_server, tuple(targets), args.revision, expected_images=targets)
+            wait_applications(
+                config.argocd_server,
+                tuple(targets),
+                args.revision,
+                expected_images=targets,
+                argocd_namespace=config.argocd_namespace,
+            )
         elif args.command == "smoke":
             config = load_config(args.config)
-            if os.environ.get("KUBECONFIG"):
-                run_kubernetes(namespace=os.environ.get("APPLICATION_NAMESPACE", "knowledge-core-dev"), kubeconfig=os.environ["KUBECONFIG"])
+            if os.environ.get("KUBECONFIG") and config.smoke_endpoints:
+                namespace = os.environ.get("APPLICATION_NAMESPACE") or config.smoke_namespace
+                run_kubernetes(
+                    namespace=namespace,
+                    kubeconfig=os.environ["KUBECONFIG"],
+                    endpoints=config.smoke_endpoints,
+                )
             else:
-                run_smoke(config.smoke_command, cwd=args.repo)
+                run_smoke(config.smoke_command, cwd=args.repo, env=dict(config.smoke_env))
         elif args.command == "summarize":
             config = load_config(args.config)
             selected = {item.strip() for item in args.services.split(",") if item.strip()}
@@ -312,7 +343,19 @@ def main(argv: list[str] | None = None) -> int:
                 if not shared_summary and not service_entries:
                     raise ConfigError("release change context has no shared or service-specific changes")
                 release_body = render_aggregate_release(aggregate_tag, shared_summary, service_entries, deployed)
-            fast_forward_main(cwd=args.repo)
+            git_identity = {}
+            if config.git_identity_name != "ci-bot" or config.git_identity_email != "ci-bot@noreply.local":
+                git_identity = {
+                    "identity_name": config.git_identity_name,
+                    "identity_email": config.git_identity_email,
+                }
+            branch_options = {}
+            if config.release_branch != "main" or config.development_branch != "dev":
+                branch_options = {
+                    "branch": config.release_branch,
+                    "development_branch": config.development_branch,
+                }
+            fast_forward_main(cwd=args.repo, **branch_options, **git_identity)
             target_commit = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=args.repo,
@@ -320,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-            create_and_push_tag(aggregate_tag, aggregate_tag, cwd=args.repo)
+            create_and_push_tag(aggregate_tag, aggregate_tag, cwd=args.repo, **git_identity)
             create_release(
                 config.source_repo,
                 aggregate_tag,
@@ -334,7 +377,14 @@ def main(argv: list[str] | None = None) -> int:
             prewarm_base_images(config.base_images, cwd=args.repo)
         elif args.command == "status":
             config = load_config(args.config)
-            set_commit_status(config.source_repo, args.sha, args.state, args.description, args.context, args.target_url)
+            set_commit_status(
+                config.source_repo,
+                args.sha,
+                args.state,
+                args.description,
+                args.context or config.status_context,
+                args.target_url,
+            )
         elif args.command == "charts-check":
             print(format_result(check_charts(args.manifest, args.root, not args.allow_missing_vendors)))
         elif args.command == "charts-mirror":

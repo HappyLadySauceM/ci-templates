@@ -5,11 +5,14 @@ on:
     branches: [main]
     paths:
       - Dockerfile
+      - runner/**
       - pyproject.toml
       - VERSION
+      - .ci/pipeline.yaml
       - README.md
       - src/**
       - tests/**
+      - deploy/arc/**
       - .github/workflows/publish.yml
   workflow_dispatch:
 
@@ -17,18 +20,27 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-templates-publish-main
+  group: ${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  CI_IMAGE: harbor.happyladysauce.local/knowledge-core/ci-templates
+  CI_PROJECT_CONFIG: .ci/pipeline.yaml
 
 jobs:
   publish:
-    runs-on: [self-hosted, Linux, X64, devops]
-    timeout-minutes: 30
+    runs-on: [self-hosted, Linux, X64, hls-builder]
+    timeout-minutes: 45
+    environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Use the checked-out control plane
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user --break-system-packages --no-build-isolation --no-deps --upgrade .
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run template tests
         run: |
@@ -43,36 +55,128 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          install -d "$RUNNER_TEMP/ci-templates-harbor"
-          printf '%s' "$HARBOR_DOCKER_CONFIG_JSON" > "$RUNNER_TEMP/ci-templates-harbor/config.json"
-          printf '%s' "$HARBOR_CA_PEM" > "$RUNNER_TEMP/ci-templates-harbor/ca.crt"
-          test -s "$RUNNER_TEMP/ci-templates-harbor/config.json"
-          test -s "$RUNNER_TEMP/ci-templates-harbor/ca.crt"
-          echo "DOCKER_CONFIG=$RUNNER_TEMP/ci-templates-harbor" >> "$GITHUB_ENV"
-          echo "SSL_CERT_FILE=$RUNNER_TEMP/ci-templates-harbor/ca.crt" >> "$GITHUB_ENV"
+          harbor_registry="$(python3 - <<'PY'
+          import os
+          from ci_templates.config import load_config
+          print(load_config(os.environ["CI_PROJECT_CONFIG"]).harbor_registry)
+          PY
+          )"
+          install -d "$RUNNER_TEMP/harbor"
+          printf '%s' "$HARBOR_DOCKER_CONFIG_JSON" > "$RUNNER_TEMP/harbor/config.json"
+          printf '%s' "$HARBOR_CA_PEM" > "$RUNNER_TEMP/harbor/ca.crt"
+          test -s "$RUNNER_TEMP/harbor/config.json" && test -s "$RUNNER_TEMP/harbor/ca.crt"
+          if [[ -s /etc/ssl/certs/ca-certificates.crt ]]; then
+            cat /etc/ssl/certs/ca-certificates.crt "$RUNNER_TEMP/harbor/ca.crt" > "$RUNNER_TEMP/harbor/ca-bundle.crt"
+          else
+            cp "$RUNNER_TEMP/harbor/ca.crt" "$RUNNER_TEMP/harbor/ca-bundle.crt"
+          fi
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/harbor" >> "$GITHUB_ENV"
+          echo "SSL_CERT_FILE=$RUNNER_TEMP/harbor/ca-bundle.crt" >> "$GITHUB_ENV"
+          echo "CI_REGISTRY_CA_FILE=$RUNNER_TEMP/harbor/ca.crt" >> "$GITHUB_ENV"
+          install -d "$RUNNER_TEMP/registry-certs/$harbor_registry"
+          cp "$RUNNER_TEMP/harbor/ca.crt" "$RUNNER_TEMP/registry-certs/$harbor_registry/ca.crt"
+          echo "REGISTRY_CERT_DIR=$RUNNER_TEMP/registry-certs" >> "$GITHUB_ENV"
+          echo "HARBOR_REGISTRY=$harbor_registry" >> "$GITHUB_ENV"
 
-      - name: Build and push versioned control image
+      - name: Read configured image coordinates
+        id: config
         run: |
           set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          from ci_templates.config import load_config
+          config = load_config(os.environ["CI_PROJECT_CONFIG"])
+          if not config.control_image_repository or not config.runner_image_repository:
+              raise SystemExit("control_image_repository and runner_image_repository are required")
+          print(f"control_image={config.control_image_repository}")
+          print(f"runner_image={config.runner_image_repository}")
+          print(f"runner_version={config.runner_version}")
+          PY
+
+      - name: Build and push versioned control and runner images
+        env:
+          CONTROL_IMAGE: ${{ steps.config.outputs.control_image }}
+          RUNNER_IMAGE: ${{ steps.config.outputs.runner_image }}
+          RUNNER_VERSION: ${{ steps.config.outputs.runner_version }}
+        run: |
+          set -euo pipefail
+          grep -R --fixed-strings -- "hls-actions-runner:$RUNNER_VERSION" deploy/arc >/dev/null || {
+            echo "ARC values must reference the configured runner version $RUNNER_VERSION" >&2
+            exit 1
+          }
           version="$(tr -d '[:space:]' < VERSION)"
           case "$version" in
-            ''|*[!0-9.]*|.*|*.)
-              echo "invalid VERSION: $version" >&2
-              exit 1
-              ;;
+            ''|*[!0-9.]*|.*|*.) echo "invalid VERSION: $version" >&2; exit 1 ;;
           esac
-          image="$CI_IMAGE:v$version"
-          if docker pull "$image" >/dev/null 2>&1; then
-            echo "Published image already exists: $image"
-            exit 0
+          control_tag="$CONTROL_IMAGE:v$version"
+          runner_tag="$RUNNER_IMAGE:$RUNNER_VERSION"
+          remote_digest() {
+            docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>/dev/null \
+              | tail -n 1 || true
+          }
+          control_digest="$(remote_digest "$control_tag")"
+          if [[ "$control_digest" != sha256:* ]]; then
+            docker build --network host --tag "$control_tag" .
+            docker push "$control_tag"
+          else
+            echo "Control image already exists remotely: $control_tag@$control_digest"
           fi
-          docker build --network host --tag "$image" .
-          push_output="$(docker push "$image" 2>&1 | tee /dev/stderr)"
-          digest="$(awk '/: digest: sha256:/ {sub(/^.*digest: /, ""); sub(/ .*/, ""); print; exit}' <<<"$push_output")"
-          test -n "$digest"
-          echo "Published $image@$digest"
+          runner_digest="$(remote_digest "$runner_tag")"
+          if [[ "$runner_digest" != sha256:* ]]; then
+            docker build --network host --file runner/Dockerfile \
+              --build-arg RUNNER_VERSION="$RUNNER_VERSION" --tag "$runner_tag" .
+            docker push "$runner_tag"
+          else
+            echo "Runner image already exists remotely: $runner_tag@$runner_digest"
+          fi
+          control_digest="$(docker buildx imagetools inspect "$control_tag" --format '{{.Manifest.Digest}}' | tail -n 1)"
+          runner_digest="$(docker buildx imagetools inspect "$runner_tag" --format '{{.Manifest.Digest}}' | tail -n 1)"
+          [[ "$control_digest" == sha256:* && "$runner_digest" == sha256:* ]]
           {
-            echo "### Published control image"
+            echo "### Published CI images"
             echo
-            echo '\`'"$image@$digest"'\`'
+            echo "- \`$control_tag@$control_digest\`"
+            echo "- \`$runner_tag@$runner_digest\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mirror the pinned ARC controller image to Harbor
+        run: |
+          set -euo pipefail
+          read -r controller_image controller_tag expected_digest < <(python3 - <<'PY'
+          import os
+          import yaml
+          from pathlib import Path
+          from ci_templates.config import load_config
+          config = load_config(os.environ["CI_PROJECT_CONFIG"])
+          values = yaml.safe_load(Path("deploy/arc/controller/values.yaml").read_text(encoding="utf-8"))
+          image = values.get("image") if isinstance(values, dict) else None
+          repository = image.get("repository") if isinstance(image, dict) else None
+          tag = image.get("tag") if isinstance(image, dict) else None
+          if not isinstance(repository, str) or not isinstance(tag, str) or "@" not in tag:
+              raise SystemExit("ARC controller image must contain repository and digest-pinned tag")
+          configured_registry = config.harbor_registry
+          if not repository.startswith(configured_registry + "/"):
+              raise SystemExit("ARC controller image must use configured Harbor registry")
+          version, digest = tag.split("@", 1)
+          print(repository + ":" + version, version, digest)
+          PY
+          )
+          if skopeo inspect --cert-dir "$REGISTRY_CERT_DIR" "docker://$controller_image" \
+              | jq -e --arg expected "$expected_digest" '.Digest == $expected' >/dev/null 2>&1; then
+            echo "ARC controller image already mirrored: $controller_image@$expected_digest"
+          else
+            skopeo copy --all --src-tls-verify=true --dest-tls-verify=true \
+              --dest-cert-dir "$REGISTRY_CERT_DIR" \
+              "docker://ghcr.io/actions/gha-runner-scale-set-controller:$controller_tag" \
+              "docker://$controller_image"
+          fi
+          skopeo inspect --cert-dir "$REGISTRY_CERT_DIR" "docker://$controller_image" \
+            | jq -e --arg expected "$expected_digest" '.Digest == $expected' >/dev/null
+
+      - name: Synchronize ARC source snapshot to deploy
+        env:
+          GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${GITOPS_TOKEN:-}" || { echo 'GITOPS_TOKEN is required for ARC snapshot promotion' >&2; exit 1; }
+          ci-templates promote-snapshot --config "$CI_PROJECT_CONFIG" --source-sha "$GITHUB_SHA"

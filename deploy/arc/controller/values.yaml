@@ -1,0 +1,47 @@
+# Values for actions-runner-controller/gha-runner-scale-set-controller.
+# The image is mirrored and digest-pinned in the deploy chart lock before use.
+replicaCount: 2
+image:
+  repository: harbor.happyladysauce.local/infrastructure/gha-runner-scale-set-controller
+  tag: "0.14.2@sha256:1b4c7f62e971ab259a4b8798e48e2adaad4af747f45990f474ea5feefa03531d"
+  pullPolicy: IfNotPresent
+imagePullSecrets:
+  - name: arc-registry-pull
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop: [ALL]
+nodeSelector:
+  workload.happyladysauce.local/ci: "true"
+tolerations:
+  - key: workload.happyladysauce.local/ci
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: gha-rs-controller
+flags:
+  logLevel: info
+  logFormat: json
+  runnerMaxConcurrentReconciles: 4
+metrics:
+  controllerManagerAddr: ":8080"
+  listenerAddr: ":8081"
+  listenerEndpoint: /metrics

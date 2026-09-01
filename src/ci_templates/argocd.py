@@ -84,14 +84,18 @@ def _ready_state(payload: dict, revision: str, expected_images: tuple[str, ...] 
     return ready, state
 
 
-def wait_targets(services: tuple[Service, ...] | list[Service], overrides: dict[str, dict[str, str]] | None = None) -> dict[str, tuple[str, ...]]:
+def wait_targets(
+    services: tuple[Service, ...] | list[Service],
+    overrides: dict[str, dict[str, str]] | None = None,
+    application_suffix: str = "-dev",
+) -> dict[str, tuple[str, ...]]:
     """Map pipeline services and image overrides to Argo applications.
 
     将流水线服务与镜像覆盖映射为 Argo Application 及期望镜像。
     """
     images_by_app: dict[str, tuple[str, ...]] = {}
     for service in services:
-        application = f"{service.kustomize_name}-dev"
+        application = f"{service.kustomize_name}{application_suffix}"
         override = (overrides or {}).get(service.kustomize_name) or {}
         repository = override.get("newName") or service.image_repository
         digest = override.get("digest", "")
@@ -105,7 +109,7 @@ def wait_targets(services: tuple[Service, ...] | list[Service], overrides: dict[
     return images_by_app
 
 
-def _request_hard_refresh(kubeconfig: str, application: str) -> None:
+def _request_hard_refresh(kubeconfig: str, application: str, namespace: str = "argocd") -> None:
     # Ask the application controller to compare against current Git HEAD even when live
     # resources already match after ignoreDifferences.
     # 强制用当前 Git HEAD 做对比；ignoreDifferences 导致无 diff 时也能刷新 revision。
@@ -115,7 +119,7 @@ def _request_hard_refresh(kubeconfig: str, application: str) -> None:
             "--kubeconfig",
             kubeconfig,
             "-n",
-            "argocd",
+            namespace,
             "annotate",
             "application",
             application,
@@ -131,7 +135,7 @@ def _request_hard_refresh(kubeconfig: str, application: str) -> None:
         raise ArgoError(f"failed to hard-refresh Argo application {application}: {detail}")
 
 
-def _get_application(kubeconfig: str, application: str) -> tuple[dict | None, str]:
+def _get_application(kubeconfig: str, application: str, namespace: str = "argocd") -> tuple[dict | None, str]:
     result = subprocess.run(
         [
             "kubectl",
@@ -141,7 +145,7 @@ def _get_application(kubeconfig: str, application: str) -> tuple[dict | None, st
             "application",
             application,
             "-n",
-            "argocd",
+            namespace,
             "-o",
             "json",
         ],
@@ -164,6 +168,7 @@ def wait_applications(
     timeout: int = 600,
     refresh_interval: int = REFRESH_INTERVAL_SECONDS,
     expected_images: dict[str, tuple[str, ...]] | None = None,
+    argocd_namespace: str = "argocd",
 ) -> dict[str, dict]:
     names = tuple(application for application in applications if application)
     if not names:
@@ -181,12 +186,12 @@ def wait_applications(
             if now - last_refresh >= max(0, refresh_interval):
                 for application in names:
                     if application in pending:
-                        _request_hard_refresh(kubeconfig, application)
+                        _request_hard_refresh(kubeconfig, application, argocd_namespace)
                 last_refresh = now
             for application in names:
                 if application not in pending:
                     continue
-                payload, last_state = _get_application(kubeconfig, application)
+                payload, last_state = _get_application(kubeconfig, application, argocd_namespace)
                 if payload is None:
                     last_states[application] = last_state
                     continue
@@ -247,6 +252,7 @@ def wait_application(
     timeout: int = 600,
     refresh_interval: int = REFRESH_INTERVAL_SECONDS,
     expected_images: tuple[str, ...] = (),
+    argocd_namespace: str = "argocd",
 ) -> dict:
     payloads = wait_applications(
         server,
@@ -255,5 +261,6 @@ def wait_application(
         timeout=timeout,
         refresh_interval=refresh_interval,
         expected_images={application: expected_images} if expected_images else None,
+        argocd_namespace=argocd_namespace,
     )
     return payloads[application]

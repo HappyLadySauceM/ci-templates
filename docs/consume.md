@@ -1,97 +1,110 @@
 # 消费指南
 
-给要接入或修改应用仓库流水线的人。当前已接入的例子：Knowledge-Core 与 Knowledge-Core-Web 的 `.github/workflows/pipeline.yml`。
+给要接入或修改应用仓库流水线的人。当前已接入的例子：Knowledge-Core 与
+Knowledge-Core-Web 的 `.github/workflows/pipeline.yml`。
 
 ## 项目仓库保留什么
 
-- `.github/workflows/pipeline.yml`：job 图、并发、environment、密钥注入、`docker run` 调用
-- 流水线配置：环境变量 `CI_PROJECT_CONFIG_JSON`，或文件 `ci-pipeline.json` / `CI_PROJECT_CONFIG`
-- 各服务源码、Dockerfile、`deploy/<service>/`、根 `VERSION`（聚合版本）
-- 可选的每服务 `version_file`（文档用，不再各自发 Release）
+- `.github/workflows/pipeline.yml`：job 图、并发、environment、密钥注入和
+  `hls-standard` / `hls-builder` runner 选择
+- `.ci/pipeline.yaml`：项目与服务配置（schema v2）
+- 各服务源码、Dockerfile、`deploy/<service>/`、根 `VERSION`
 
-不要把本仓库的 Python 源码 vendoring 进应用仓库。不要在应用仓库重写 promote / charts / release 逻辑。
+不要把本仓库的 Python 源码 vendoring 进应用仓库，也不要在项目仓库重写
+build、promote、GitOps 或 release 逻辑。
 
 ## 配置从哪来
 
-优先读环境变量 `CI_PROJECT_CONFIG_JSON`（Knowledge-Core 的做法）。未设置时读 `--config` 或 `CI_PROJECT_CONFIG`，默认 `ci-pipeline.json`。
+新项目把配置放进 `.ci/pipeline.yaml`，workflow 通过
+`CI_PROJECT_CONFIG=.ci/pipeline.yaml` 和 `--config` 传给 CLI。CLI 仍兼容旧的
+`CI_PROJECT_CONFIG_JSON` 与 `ci-pipeline.json`，但显式文件路径优先，避免宿主
+机残留环境变量覆盖仓库配置。
 
-字段表见 [CLI 与配置](cli-and-config.md)。JSON 里只放仓库路径与服务清单，不放 Harbor 密码、kubeconfig 或 GitHub App 私钥。
+字段表见 [CLI 与配置](cli-and-config.md)。配置只放仓库路径、服务清单、镜像
+坐标和 smoke 参数；Harbor 密码、kubeconfig、GitHub App 私钥必须来自
+GitHub environment secrets 或集群 Secret。
 
 ## 推荐 job 切分
 
-Knowledge-Core 的实际顺序：
-
 ```text
 push dev
-  → plan: validate + changes
-      ├─ 有 build_services → 质量门禁 + package-candidates（prewarm + build）
-      ├─ 仅 deploy 变更 → deploy-verify（kustomize / 配置校验）
-      └─ 有任何发布变更 → release-notes（summarize）
-  → deploy-release:
-        promote-snapshot → 校验 digest → argo-wait → smoke
-        → promote-candidate + release
+  → plan: validate + changes + release context
+      ├─ standard: Go/Rust/Node 质量门禁并上传 GitHub Artifacts
+      ├─ builder: prewarm + service matrix 构建不可变 candidate
+      └─ standard: release-notes
+  → standard deploy-release:
+        promote-snapshot(CAS retry) → apply ApplicationSet
+        → argo-wait → smoke → Harbor tag promotion + release
         → 失败且冒烟未通过则 rollback-snapshot
+  → standard cleanup-candidates
 ```
 
 要点：
 
-1. `changes --base $(git rev-parse origin/main) --details-file /state/changes.json` 必须在构建之前跑，并把文件只读挂到 `summarize` / `release`。
-2. 有镜像变更时先 `prewarm` 再 `build --tag sha-$GITHUB_SHA`。BuildKit 容器网络不可靠解析外网 registry 时，由 runner 主机把基础镜像填进 Harbor。
-3. `promote-snapshot` 用 `CI_GITOPS_IMAGE_OVERRIDES_JSON` 写入 digest；deploy-only 时 overrides 为空对象。
-4. `argo-wait --revision <gitops_sha> --services <release_services>` 只等本次受影响服务。
-5. `smoke` 在设置了 `KUBECONFIG` 时走集群内置检查；否则执行配置里的 `smoke_command`。
-6. `release --summary-file /state/release.md --changes-file /state/changes.json` 不再请求模型。
-7. 冒烟已通过后，即使后续 release 步骤失败，也不要 `rollback-snapshot`，以便幂等重试。
+1. `changes --base <main-sha> --details-file changes.json` 在构建前运行一次；
+   `changes.json`、编译产物、candidate digest 和 release summary 都通过
+   GitHub Artifacts 跨 job 传递，不依赖宿主机目录。
+2. `hls-standard` 只执行质量、GitOps、Argo 和 smoke；`hls-builder` 才允许
+   Docker-in-Docker 特权构建。matrix 的 `max-parallel` 不得超过 builder
+   Scale Set 的 `maxRunners: 4`。
+3. `build --tag sha-<GITHUB_SHA> --reuse-existing` 使用不可变 candidate；
+   重试时复用已存在的远端 manifest，避免覆盖 tag。
+4. `promote-snapshot` 以 GitOps 分支头为 CAS，远端前进时重新 clone 并重试；
+   禁止 force-push。digest override 写入 deploy 的 kustomization。
+5. `argo-wait --revision <gitops-sha> --services <release_services>` 只等待
+   本次受影响的 Application，并核对期望 digest。
+6. `smoke` 在有 `KUBECONFIG` 且配置了 `smoke_endpoints` 时走 Kubernetes API
+   proxy，否则执行配置里的 `smoke_command` 和 `smoke_env`。
+7. 冒烟成功后，即使后续 Harbor promotion 或 Release 步骤失败，也不要回滚
+   已验证的 GitOps snapshot，以便安全重试。只有候选已成功提升为 active tag
+   才由 cleanup job 回收；promotion 失败时保留候选 tag，避免 digest 被垃圾回收。
 
-## 挂载与环境变量
+## Runner 与密钥边界
 
-| 挂载或变量 | 用途 |
+| Runner / Secret | 用途 |
 | --- | --- |
-| `-v $WORKSPACE:/workspace` | 应用源码；容器 `WORKDIR` 为 `/workspace` |
-| `-v $STATE_DIR:/state` | `changes.json`、`release.md`、artifact manifest |
-| Docker socket + `DOCKER_CONFIG` | `build` / `promote-candidate` / Harbor |
-| Harbor CA（如 `CI_REGISTRY_CA_FILE` / `SSL_CERT_FILE`） | 私有 registry TLS |
-| `CI_PROJECT_CONFIG_JSON` | 流水线配置 |
+| `hls-standard`（最多 8） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup |
+| `hls-builder`（最多 4） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
+| `arc-github-app` | ARC 在每个 runner namespace 注册 ephemeral runner |
+| `HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM` | Harbor pull/push 与 TLS |
+| `K3S_RELEASE_KUBECONFIG` | deploy-release 的集群访问 |
+| `GH_APP_ID`、`GH_APP_PRIVATE_KEY` | 访问源仓库、deploy、status 与 Release |
+| `GITOPS_TOKEN` | ci-templates runner snapshot 推送 |
+| `DEEPSEEK_API_KEY` | release-notes 的单次摘要 |
+| `CI_PROJECT_CONFIG` | `.ci/pipeline.yaml` 配置路径 |
 | `CI_GITOPS_IMAGE_OVERRIDES_JSON` | promote-snapshot / argo-wait 的 digest |
-| `GITOPS_TOKEN` | 向 deploy 仓库 fast-forward 推送 |
-| `GITHUB_TOKEN` | `release` / `status` |
-| `DEEPSEEK_API_KEY` | `summarize` |
-| `KUBECONFIG` | `argo-wait` / `smoke` |
+| `CI_RELEASE_CHANGES_FILE` | 未传 `--changes-file` 时的 release 上下文 |
 | `BUILD_CPU_PERCENT` | 构建并行比例，默认 75 |
 | `CI_BUILDER_NAME` | 可选的 Buildx builder 名；默认 `ci-templates`，不同名称使用独立状态 |
 | `CI_REGISTRY_CA_FILE` | 可选的 Harbor CA 文件；内容指纹变化会触发 builder 重建 |
-| `CI_RELEASE_CHANGES_FILE` | 未传 `--changes-file` 时的 release 上下文 |
 
-不要把 `DOCKER_CONFIG` 挂到 `/root/.docker`。镜像内 `/root` 是 `700`，容器一旦以 runner UID 运行就读不到。挂到 `/ci/docker`，并设 `DOCKER_CONFIG=/ci/docker`。
+标准 runner 不挂宿主机 Docker socket；builder 使用 Pod 内隔离的 Docker-in-
+Docker，并将 Harbor CA 以 Secret 挂入 daemon。每个 runner Pod 的 workspace、
+BuildKit cache 和 runner 临时目录都是 ephemeral；不要在 workflow 中写
+`/opt/actions-runner`、`/etc/rancher/k3s`、`/var/lib/rancher` 或宿主机 `_cache`。
 
-## 容器 UID 与 runner 路径
+GitHub environment secrets 需要在所有读取它们的 job 上声明
+`environment: release`。ARC 的 GitHub App 只授予 organization
+self-hosted-runner read/write，不授予仓库 contents。
 
-控制镜像没有 `USER`，默认是 root。自托管 runner 复用 `_work` 时，root 写入的 `.git/objects` 会让后续 `actions/checkout` 失败。每次调用必须对齐 **当前 runner 进程** 的 UID/GID，不要写死某台机器的数字：
+Buildx builder 默认名为 `ci-templates`，用于在同一 runner 上跨服务复用
+BuildKit cache。需要在同一 Docker daemon 上隔离不同流水线时，可通过
+`CI_BUILDER_NAME` 指定 1–63 个字符的安全名称（仅字母、数字、`.`, `_`, `-`）；
+每个名称使用独立的资源 marker。未设置时保持历史 marker 路径不变。
+设置 `CI_REGISTRY_CA_FILE` 时，marker 只保存 CA 文件的 SHA-256 指纹；CA 内容
+变化会受控重建 builder，不会写入 marker。
 
-```bash
-socket="${DOCKER_HOST:-unix:///var/run/docker.sock}"
-socket="${socket#unix://}"
-ci_run() {
-  docker run --rm --network host \
-    --user "$(id -u):$(id -g)" \
-    --group-add "$(stat -c '%g' "$socket")" \
-    -e HOME="${RUNNER_TEMP:-/tmp}" \
-    -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
-    -e http_proxy -e https_proxy -e no_proxy \
-    "$@"
-}
-```
+## 控制镜像与 runner 镜像
 
-- `--user "$(id -u):$(id -g)"`：换机器、以后迁 rootless 都成立
-- `--group-add "$(stat -c '%g' "$socket")"`：系统 Docker 的 `root:docker` socket；rootless 时 gid 就是 runner 自己
-- `-e HOME=...`：容器内没有对应 passwd 条目时，git / Python 仍有可写家目录
-- `-e HTTP_PROXY` 等：从 runner 环境透传宿主机 sing-box 代理；未设置时（GitHub-hosted）为空，不影响直连
-- 缓存目录：`"$(cd "$GITHUB_WORKSPACE/../.." && pwd)/_cache/knowledge-core"`，不要写死 `/opt/actions-runner`
-- Go 工具：`${RUNNER_TOOL_CACHE}/knowledge-core-go-tools`
+控制镜像发布到 `control_image_repository`，runner 镜像发布到
+`runner_image_repository:<runner_version>`；runner 镜像内包含固定版本的
+Actions runner、kubectl、Helm、Rust 工具链和 `ci-templates` CLI。首次迁移时可
+从受信任旧 runner 或管理员工作站 bootstrap 一次，之后发布 workflow 使用
+`hls-builder` 自举。
 
-密钥来源是 GitHub environment / Actions secrets，或 runner 上的受控文件。不要把它们写进配置 JSON、锁文件、日志或 Release。
-
-当前 Knowledge-Core 使用 GitHub App token 访问 `Knowledge-Core` 与 `deploy`，把该 token 同时当作 `GITOPS_TOKEN` 与 `GITHUB_TOKEN`。kubeconfig 来自节点 `/etc/rancher/k3s/k3s.yaml` 或 `K3S_RELEASE_KUBECONFIG`。仓库不保存 token 明文。
+controller 镜像使用 digest pin；runner tag 必须在 Harbor 启用不可变 tag。ARC
+values、namespace、Secret、专用 CI 节点和 chart mirror 由 deploy 仓库管理，
+不要把私钥或账号写入 values。
 
 ## Pin 控制镜像
 
@@ -102,15 +115,12 @@ env:
 
 本仓库 `ci-templates-publish` 成功后会在 job summary 打出 `image@digest`。消费方必须开 PR 更新 `CI_IMAGE`。未 pin digest 的 tag 不得用于生产 workflow。
 
-Runner 标签与 deploy 宿主机约定一致：`self-hosted`、`Linux`、`X64`、`devops`。不要在该 runner 上跑全局 `docker image prune`；只清理由 `CI_BUILDER_NAME` 指定的 Buildx 缓存与本项目状态目录。builder 名必须是安全的 1–63 字符字母数字串，可包含 `.`, `_`, `-`；不要把凭据或路径放入其中。
-
 ## 本地试跑
 
 ```text
-PYTHONPATH=src python3 -m ci_templates validate --config /path/to/ci-pipeline.json
-PYTHONPATH=src python3 -m ci_templates changes --config /path/to/ci-pipeline.json --base origin/main
+PYTHONPATH=src python3 -m ci_templates validate --config /path/to/.ci/pipeline.yaml
+PYTHONPATH=src python3 -m ci_templates changes --config /path/to/.ci/pipeline.yaml --base origin/main
 docker build -t ci-templates:dev .
-docker run --rm --user "$(id -u):$(id -g)" -e HOME="${TMPDIR:-/tmp}" -v "$PWD:/workspace" -e CI_PROJECT_CONFIG_JSON='...' ci-templates:dev changes --base HEAD~1
 ```
 
 向 GitOps 或 Harbor 推送的命令不要在无凭据的笔记本上对生产仓库执行。

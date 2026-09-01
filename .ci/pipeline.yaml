@@ -1,0 +1,43 @@
+schema_version: 2
+project: ci-templates
+source_repo: HappyLadySauceM/ci-templates
+gitops_repo: https://github.com/HappyLadySauceM/deploy.git
+gitops_path: ci-templates
+gitops_kustomization: deploy/arc/kustomization.yaml
+gitops_branch: main
+release_branch: main
+development_branch: main
+git_identity_name: happyladysauce-ci
+git_identity_email: happyladysauce-ci@noreply.local
+shared_paths:
+  - .ci
+  - .github
+  - deploy/arc
+  - runner
+  - src
+  - tests
+  - pyproject.toml
+  - VERSION
+harbor_registry: harbor.happyladysauce.local
+harbor_project: infrastructure
+control_image_repository: harbor.happyladysauce.local/knowledge-core/ci-templates
+runner_image_repository: harbor.happyladysauce.local/infrastructure/hls-actions-runner
+runner_version: 2.333.0
+argocd_server: argocd.happyladysauce.local
+argocd_namespace: argocd
+smoke_command: []
+release_model: git-independent-service-aggregate
+aggregate_release_prefix: ci-templates
+aggregate_version_file: VERSION
+release_language: zh-CN
+base_images: []
+services:
+  - name: runner
+    source_path: runner
+    version_file: VERSION
+    dockerfile: runner/Dockerfile
+    context: .
+    image_repository: harbor.happyladysauce.local/infrastructure/hls-actions-runner
+    deploy_snapshot: deploy/arc
+    kustomize_name: hls-actions-runner
+    artifact_group: container

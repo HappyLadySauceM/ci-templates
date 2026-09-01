@@ -18,7 +18,8 @@ Registry 登录走 Helm 运行时配置（runner 的 Docker/Helm 凭据），**�
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
 | `name` | 是 | Chart 名 |
-| `repository` | 是 | 上游 Helm 仓库 URL |
+| `repository` | 是 | 上游 Helm 仓库 URL；也支持 `oci://` registry |
+| `sourceName` | 否 | 上游实际 Chart 名；用于同一个 OCI Chart 以不同 values 渲染多个锁项 |
 | `version` | 是 | 上游版本（下载用） |
 | `sha256` | 是 | 上游压缩包的小写 SHA256（64 位 hex） |
 | `targetVersion` | 是 | 推到内部 OCI / 写入 Chart.yaml 的版本 |

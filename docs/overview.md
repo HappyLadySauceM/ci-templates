@@ -1,61 +1,63 @@
 # 全景
 
-ci-templates 是组织的 CI/CD **控制面镜像**，不是应用仓库里的 workflow 模板文件。项目仓库只保留：
-
-- 薄的 `.github/workflows/pipeline.yml`（编排 job、挂载密钥、调用本镜像）
-- 项目自有 manifest（`CI_PROJECT_CONFIG_JSON` 或 `ci-pipeline.json`、各服务 `deploy/`）
-
-通用逻辑全部在本仓库的 Python CLI 里，经 Docker 发布后按 digest 固定使用。
+ci-templates 是组织的 CI/CD 控制面；应用仓库只保留薄 workflow 与
+`.ci/pipeline.yaml`，不再把 Python 代码、宿主机路径或 Docker socket 带进
+项目流水线。
 
 ```text
 应用仓库 (Knowledge-Core / Knowledge-Core-Web)
-  pipeline.yml  →  docker run ... ci-templates:<version>@sha256:... <command>
-        │
-        ├─ build / promote-candidate  →  Harbor
-        │     harbor.happyladysauce.local/knowledge-core/<service>
-        │
-        └─ promote-snapshot  →  deploy.git
-              Knowledge-Core/deploy/  或  Knowledge-Core-Web/deploy/
-              dev/common 镜像 digest
-                    │
-                    ▼
-              Argo CD ApplicationSet
-                    │
-                    ▼
-              argo-wait + smoke  →  release（聚合 tag + GitHub Release）
+  pipeline.yml → hls-standard / hls-builder ARC Scale Set
+       │
+       ├─ standard: plan、质量门禁、release notes、GitOps、Argo、smoke
+       │       └─ GitHub Artifacts：计划、编译产物、candidate digest、摘要
+       │
+       └─ builder: BuildKit + Pod 内 Docker-in-Docker（matrix，最多 4）
+                         │
+                         ▼
+              Harbor candidate → GitOps digest snapshot
+                         │
+                         ▼
+                    Argo CD ApplicationSet
+                         │
+                         ▼
+              argo-wait + smoke → Harbor active tag + 聚合 Release
 ```
 
-平台 Chart 走另一条线：deploy 仓库的 [k3s/charts.lock.yaml](https://github.com/HappyLadySauceM/deploy/blob/main/k3s/charts.lock.yaml) 交给 `charts-check` / `charts-mirror`，推到 `oci://harbor.happyladysauce.local/helm`。见 [Chart](charts.md) 与 [deploy 变更指南](https://github.com/HappyLadySauceM/deploy/blob/main/docs/change-guide.md)。
+## ARC 运行池
 
-## 控制镜像
+| 池 | Namespace | 最大 runner | 用途 |
+| --- | --- | ---: | --- |
+| `hls-standard` | `arc-runners-standard` | 8 | 质量、部署、Argo、smoke、清理 |
+| `hls-builder` | `arc-runners-builder` | 4 | 特权 Docker-in-Docker 构建与 prewarm |
+| controller | `arc-system` | 2 replicas | 管理两个 Scale Set |
 
-| 项 | 值 |
-| --- | --- |
-| 仓库 | `harbor.happyladysauce.local/knowledge-core/ci-templates` |
-| Tag | `v` + [VERSION](../VERSION) 文件 |
-| 生产引用 | `vVERSION@sha256:...`（digest 必填） |
-| 入口 | `ci-templates` |
-| 工作目录 | `/workspace` |
-| 发布 workflow | [`.github/workflows/publish.yml`](../.github/workflows/publish.yml)，runner 标签 `self-hosted, Linux, X64, devops` |
+两个池调度到带 `workload.happyladysauce.local/ci=true:NoSchedule` 的专用节点；
+标准池不挂宿主机 socket，builder 的 privileged 只存在于隔离 namespace。ARC
+values 的非密钥真源在 [deploy/arc](../deploy/arc/)，由 ci-templates 发布时同步
+到 deploy 仓库。
 
-消费方在成功发布新版本后必须更新自己的 pin。不要跟踪浮动的 `:latest` 或未带 digest 的 tag。步骤见 [发布](release.md)。
+## 镜像与 GitOps
 
-## Harbor 标签语义
+- 控制镜像：`control_image_repository:vVERSION`，用于提供 CLI。
+- runner 镜像：`runner_image_repository:<runner_version>`，含 Actions runner、
+  kubectl、Helm、Rust 工具链和 CLI；Harbor 对该版本 tag 启用不可变策略。
+- 应用 candidate：`<service>:sha-<GITHUB_SHA>`；质量门禁通过后由 Harbor API
+  将 manifest 挂到配置的 active tag，无需 Docker promotion。
+- GitOps snapshot：以 GitOps 分支头为 CAS，写入 `.source-revision` 与 digest
+  overrides；禁止 force-push，远端前进时重试。
 
-| 标签 | 含义 |
-| --- | --- |
-| `:dev` | 当前已提升、集群应拉取的应用镜像 |
-| `:previous` | 回滚缓冲（`restore-previous`） |
-| `:buildcache` | Buildx 缓存 |
-| `:sha-<commit>` | 构建候选；冒烟通过后 `promote-candidate`，再 `cleanup-candidate` |
-
-控制面本身不扫描、不签名这些镜像。
+平台 ARC Chart 从 [k3s/charts.lock.yaml](https://github.com/HappyLadySauceM/deploy/blob/main/k3s/charts.lock.yaml)
+审计并镜像到 Harbor OCI，见 [Chart](charts.md)。
 
 ## 密钥边界
 
-- 配置 JSON 只描述路径、仓库名、服务列表，不放密码
-- Chart 锁文件不放 registry 账号；Helm 使用运行时 registry 配置
-- DeepSeek 只看到脱敏后的 diff 片段，看不到 commit / 分支 / workflow / 凭据元数据
-- GitOps 推送使用 `GITOPS_TOKEN`；Release 使用 `GITHUB_TOKEN`；集群操作用 `KUBECONFIG`
+配置文件只描述路径、仓库、镜像和 smoke 参数。GitHub App、Harbor 凭据、
+kubeconfig、DeepSeek key 分别来自 ARC/部署 Secret 或 GitHub `release`
+environment；不写入 workflow、日志、artifact 或 Release 正文。
 
-谁改 deploy 里的快照、谁改 `k3s/`，见 [deploy README](https://github.com/HappyLadySauceM/deploy/blob/main/README.md)。
+## 控制镜像发布
+
+`ci-templates-publish` 在 `main` 变更后运行测试、构建控制/runner 镜像，并将
+controller 镜像从 GHCR 按 digest 镜像到 Harbor。第一次迁移可由受信任旧 runner
+或管理员工作站 bootstrap runner 镜像；之后发布 workflow 使用 `hls-builder`
+自举。

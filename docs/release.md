@@ -23,9 +23,12 @@
 
 ### 上下文与模型
 
-1. 构建前：`changes --base <main-sha> --details-file /state/changes.json`
-2. `summarize --changes-file /state/changes.json --services ... --output /state/release.md`：一次有界 DeepSeek 请求，正文文件权限 `0600`
-3. `release --changes-file /state/changes.json --summary-file /state/release.md`：不再请求模型
+1. 构建前：`changes --base <main-sha> --details-file changes.json`
+2. `summarize --changes-file changes.json --services ... --output release.md`：一次有界 DeepSeek 请求，正文文件权限 `0600`
+3. `release --changes-file changes.json --summary-file release.md`：不再请求模型
+
+`changes.json`、编译产物和 `release.md` 在 job 之间使用 GitHub Artifacts；不
+需要把状态目录或 Docker volume 挂到宿主机。
 
 没有 `--summary-file` 时，`release` 会按 shared / 每服务分别请求模型。消费方应走 summarize + summary-file，避免重复计费与不一致。
 
@@ -51,11 +54,13 @@ Diff 上下文会脱敏并截断。commit、分支、workflow、凭据元数据�
    - `PYTHONPATH=src python3 -m unittest discover -s tests -v`
    - `python3 -m compileall -q src`
    - 若 `ci-templates:v$VERSION` 尚不存在则 `docker build --network host` 并 push
+   - 若 `hls-actions-runner:$runner_version` 尚不存在则构建并 push runner 镜像
+   - 将 digest 固定的 ARC controller 镜像镜像到 Harbor，并把 `deploy/arc` 快照按 CAS 推送到 deploy
    - 已存在的不可变 tag **跳过重建**
-4. job summary 输出 `harbor.happyladysauce.local/knowledge-core/ci-templates:vVERSION@sha256:...`
-5. 每个消费仓库把 `CI_IMAGE` 更新为该 digest 并单独开 PR
+4. job summary 输出控制镜像与 runner 镜像的 `image@digest`
+5. 消费仓库只需保持 `.ci/pipeline.yaml` 的 runner 版本与 Harbor 不可变 tag 一致；不再在 workflow 里挂控制镜像或宿主机 Docker
 
-不要把未 pin digest 的控制镜像用于生产流水线。Harbor 凭据来自 runner secrets（`HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM`），不进本仓库。
+不要把未 pin digest 的 controller 镜像或可变 runner tag 用于生产。Harbor 凭据来自 GitHub `release` environment secrets（`HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM`），不进本仓库。runner tag 由 Harbor immutable policy 保护。
 
 本地：
 

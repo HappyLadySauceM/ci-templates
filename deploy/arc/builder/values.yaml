@@ -1,0 +1,115 @@
+# Values for actions-runner-controller/gha-runner-scale-set.
+githubConfigUrl: https://github.com/HappyLadySauceM
+githubConfigSecret: arc-github-app
+runnerGroup: happyladysauce-ci
+runnerScaleSetName: hls-builder
+scaleSetLabels:
+  - hls-builder
+controllerServiceAccount:
+  namespace: arc-system
+  name: gha-runner-scale-set-controller-gha-rs-controller
+minRunners: 0
+maxRunners: 4
+imagePullSecrets:
+  - name: arc-registry-pull
+containerMode: {}
+template:
+  metadata:
+    labels:
+      workload.happyladysauce.local/pool: builder
+  spec:
+    securityContext:
+      fsGroup: 1001
+      fsGroupChangePolicy: OnRootMismatch
+      seccompProfile:
+        type: RuntimeDefault
+    serviceAccountName: hls-builder-runner
+    nodeSelector:
+      workload.happyladysauce.local/ci: "true"
+    tolerations:
+      - key: workload.happyladysauce.local/ci
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+    initContainers:
+      - name: init-dind-externals
+        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.333.0
+        command: ["cp", "-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+        volumeMounts:
+          - name: dind-externals
+            mountPath: /home/runner/tmpDir
+    containers:
+      - name: dind
+        image: docker:28.3.3-dind@sha256:a56b3bdde89315ed2cc0e4906e582b5033d93bf20d9cb9510c2cdd4e7f7690b1
+        args: ["dockerd", "--host=unix:///var/run/docker.sock", "--group=$(DOCKER_GROUP_GID)"]
+        env:
+          - name: DOCKER_GROUP_GID
+            value: "123"
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            cpu: 7.5
+            memory: 9Gi
+          limits:
+            cpu: 7.5
+            memory: 9Gi
+        startupProbe:
+          exec:
+            command: ["docker", "info"]
+          failureThreshold: 24
+          periodSeconds: 5
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+          - name: dind-externals
+            mountPath: /home/runner/externals
+          - name: harbor-ca
+            mountPath: /etc/docker/certs.d/harbor.happyladysauce.local/ca.crt
+            subPath: ca.crt
+            readOnly: true
+      - name: runner
+        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.333.0
+        imagePullPolicy: IfNotPresent
+        command: ["/home/runner/run.sh"]
+        env:
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+        resources:
+          requests:
+            # Keep the runner cgroup aligned with the DIND daemon so
+            # build_jobs() sees the CPUs that BuildKit can actually use.
+            cpu: 7.5
+            memory: 1Gi
+          limits:
+            cpu: 7.5
+            memory: 1Gi
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+          - name: dind-externals
+            mountPath: /home/runner/externals
+          - name: harbor-ca
+            mountPath: /etc/docker/certs.d/harbor.happyladysauce.local/ca.crt
+            subPath: ca.crt
+            readOnly: true
+    volumes:
+      - name: work
+        emptyDir:
+          sizeLimit: 50Gi
+      - name: dind-sock
+        emptyDir: {}
+      - name: dind-externals
+        emptyDir: {}
+      - name: harbor-ca
+        secret:
+          secretName: arc-registry-ca

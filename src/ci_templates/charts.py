@@ -47,6 +47,7 @@ class Chart:
     remove_templates: tuple[str, ...]
     replace_templates: tuple[tuple[str, str], ...]
     vendor_path: str | None
+    source_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,9 @@ def load_chart_manifest(path: str | Path) -> ChartManifest:
         if not isinstance(item, dict):
             raise ChartError(f"{context} must be a mapping")
         name = _required_string(item, "name", context)
+        source_name = item.get("sourceName", name)
+        if not isinstance(source_name, str) or not source_name.strip() or "/" in source_name or "\\" in source_name:
+            raise ChartError(f"{context}.sourceName must be a chart name")
         digest = _required_string(item, "sha256", context).lower()
         if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise ChartError(f"{context}.sha256 must be a lowercase SHA256 digest")
@@ -127,6 +131,7 @@ def load_chart_manifest(path: str | Path) -> ChartManifest:
                 for target, source in replace_templates.items()
             ),
             vendor_path=_relative_path(vendor_path, f"{context}.vendorPath") if vendor_path else None,
+            source_name=source_name if source_name != name else None,
         ))
     names = [chart.name for chart in charts]
     if len(names) != len(set(names)):
@@ -276,10 +281,17 @@ def _prepare_chart(chart: Chart, root: Path, work: Path) -> tuple[Path, tuple[st
     extract_dir = work / "extract"
     download_dir.mkdir()
     extract_dir.mkdir()
-    _run([
-        "helm", "pull", chart.name, "--repo", chart.repository,
-        "--version", chart.version, "--destination", str(download_dir),
-    ])
+    if chart.repository.startswith("oci://"):
+        source = f"{chart.repository.rstrip('/')}/{chart.source_name or chart.name}"
+        _run([
+            "helm", "pull", source, "--version", chart.version,
+            "--destination", str(download_dir),
+        ])
+    else:
+        _run([
+            "helm", "pull", chart.source_name or chart.name, "--repo", chart.repository,
+            "--version", chart.version, "--destination", str(download_dir),
+        ])
     archives = list(download_dir.glob("*.tgz"))
     if len(archives) != 1:
         raise ChartError(f"expected one downloaded archive for chart {chart.name}")
@@ -340,6 +352,7 @@ def mirror_charts(manifest_path: str | Path, root: str | Path = ".") -> dict[str
     manifest = load_chart_manifest(manifest_path)
     repository_root = Path(root).resolve()
     mirrored: list[dict[str, Any]] = []
+    pushed: set[tuple[object, ...]] = set()
     for chart in manifest.charts:
         with tempfile.TemporaryDirectory(prefix=f"chart-{chart.name}-") as directory:
             work = Path(directory)
@@ -350,7 +363,17 @@ def mirror_charts(manifest_path: str | Path, root: str | Path = ".") -> dict[str
             archives = list(package_dir.glob("*.tgz"))
             if len(archives) != 1:
                 raise ChartError(f"expected one package for chart {chart.name}")
-            _run(["helm", "push", str(archives[0]), manifest.destination])
+            identity = (
+                chart.repository,
+                chart.source_name or chart.name,
+                chart.target_version,
+                chart.sha256,
+                chart.remove_templates,
+                chart.replace_templates,
+            )
+            if identity not in pushed:
+                _run(["helm", "push", str(archives[0]), manifest.destination])
+                pushed.add(identity)
             if chart.vendor_path:
                 _replace_vendor(chart_dir, repository_root, chart.vendor_path)
             mirrored.append({

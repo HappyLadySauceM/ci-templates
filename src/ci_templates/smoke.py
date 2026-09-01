@@ -3,24 +3,29 @@ from __future__ import annotations
 import subprocess
 import json
 import time
+import os
 
 
-def run(command: tuple[str, ...], cwd: str = ".") -> None:
+def run(command: tuple[str, ...], cwd: str = ".", env: dict[str, str] | None = None) -> None:
     if not command:
         raise ValueError("smoke command must not be empty")
-    subprocess.run(list(command), cwd=cwd, check=True)
+    process_env = os.environ.copy()
+    if env:
+        process_env.update(env)
+    subprocess.run(list(command), cwd=cwd, check=True, env=process_env)
 
 
-def run_kubernetes(namespace: str = "knowledge-core-dev", kubeconfig: str | None = None, attempts: int = 30) -> None:
-    """Exercise every admin readiness endpoint and the public document read path."""
-    endpoints = (
-        ("knowledge-core-gateway", "8082", "/readyz"),
-        ("knowledge-core-identity", "8081", "/readyz"),
-        ("knowledge-core-knowledge", "8083", "/readyz"),
-        ("knowledge-core-collaboration", "8084", "/health/ready"),
-        ("knowledge-core-gateway", "8080", "/health/ready"),
-        ("knowledge-core-gateway", "8080", "/api/v1/documents?limit=1"),
-    )
+def run_kubernetes(
+    namespace: str,
+    kubeconfig: str | None = None,
+    attempts: int = 30,
+    endpoints: tuple[tuple[str, str, str], ...] = (),
+) -> None:
+    """Exercise configured readiness and smoke endpoints through the API proxy."""
+    if not namespace:
+        raise ValueError("smoke namespace must not be empty")
+    if not endpoints:
+        raise ValueError("at least one Kubernetes smoke endpoint is required")
     for service, port, path in endpoints:
         raw_path = f"/api/v1/namespaces/{namespace}/services/http:{service}:{port}/proxy{path}"
         command = ["kubectl"]

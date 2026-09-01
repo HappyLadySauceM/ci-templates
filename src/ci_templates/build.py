@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 from .config import Service
-from .harbor import HarborClient, ImageRef
+from .harbor import HarborClient, HarborError, ImageRef
 
 
 class BuildError(RuntimeError):
@@ -180,14 +180,24 @@ def _docker(args: list[str], cwd: str = ".", check: bool = True) -> subprocess.C
     return subprocess.run(["docker", *args], cwd=cwd, check=check, stdout=sys.stderr, text=True)
 
 
-def _buildkitd_config(jobs: int, registry: str, registry_ca: str | None) -> str:
+def _buildkitd_config(
+    jobs: int,
+    registry: str,
+    registry_ca: str | None,
+    reserved_space: str | None = None,
+    max_used_space: str | None = None,
+    min_free_space: str | None = None,
+) -> str:
+    reserved = (reserved_space if reserved_space is not None else os.environ.get("BUILDKIT_RESERVED_SPACE", "2GB")).strip() or "2GB"
+    maximum = (max_used_space if max_used_space is not None else os.environ.get("BUILDKIT_MAX_USED_SPACE", "8GB")).strip() or "8GB"
+    minimum = (min_free_space if min_free_space is not None else os.environ.get("BUILDKIT_MIN_FREE_SPACE", "50GB")).strip() or "50GB"
     lines = [
         "[worker.oci]",
         f"  max-parallelism = {jobs}",
         "  gc = true",
-        '  reservedSpace = "2GB"',
-        '  maxUsedSpace = "8GB"',
-        '  minFreeSpace = "50GB"',
+        f"  reservedSpace = {json.dumps(reserved)}",
+        f"  maxUsedSpace = {json.dumps(maximum)}",
+        f"  minFreeSpace = {json.dumps(minimum)}",
     ]
     if registry_ca:
         lines.extend(
@@ -216,36 +226,51 @@ def _registry_ca_fingerprint(registry_ca: str | None) -> str | None:
     return digest.hexdigest()
 
 
-def _ensure_builder(service: Service, jobs: int, cwd: str) -> str:
-    builder_name = _configured_builder_name()
+def _ensure_builder(
+    service: Service,
+    jobs: int,
+    cwd: str,
+    *,
+    reserved_space: str | None = None,
+    max_used_space: str | None = None,
+    min_free_space: str | None = None,
+) -> str:
+    name = _configured_builder_name()
     registry = service.image_repository.split("/", 1)[0]
     registry_ca = os.environ.get("CI_REGISTRY_CA_FILE", "").strip() or None
     registry_ca_fingerprint = _registry_ca_fingerprint(registry_ca)
-    inspect = _docker(["buildx", "inspect", builder_name], cwd=cwd, check=False)
+    inspect = _docker(["buildx", "inspect", name], cwd=cwd, check=False)
     if inspect.returncode == 0 and _builder_matches(
         jobs,
         registry,
-        builder_name=builder_name,
+        builder_name=name,
         registry_ca_fingerprint=registry_ca_fingerprint,
     ):
-        return builder_name
+        return name
 
     if inspect.returncode == 0:
-        _docker(["buildx", "rm", "--force", builder_name], cwd=cwd)
+        _docker(["buildx", "rm", "--force", name], cwd=cwd)
 
     # The runner reaches Harbor through its host DNS/network.  BuildKit runs in
     # a container, so keep that container on host networking as well; otherwise
     # private registry names resolve on the host but not inside BuildKit.
     create_args = [
         "buildx", "create", "--driver", "docker-container",
-        "--driver-opt", "network=host", "--name", builder_name,
+        "--driver-opt", f"network={os.environ.get('BUILDKIT_NETWORK', 'host')}", "--name", name,
     ]
     buildkit_config: tempfile.TemporaryDirectory[str] | None = None
     try:
         buildkit_config = tempfile.TemporaryDirectory(prefix="ci-templates-buildkit-")
         config_path = Path(buildkit_config.name) / "buildkitd.toml"
         config_path.write_text(
-            _buildkitd_config(jobs, registry, str(Path(registry_ca)) if registry_ca else None),
+            _buildkitd_config(
+                jobs,
+                registry,
+                str(Path(registry_ca)) if registry_ca else None,
+                reserved_space,
+                max_used_space,
+                min_free_space,
+            ),
             encoding="utf-8",
         )
         create_args.extend(["--buildkitd-config", str(config_path)])
@@ -253,16 +278,16 @@ def _ensure_builder(service: Service, jobs: int, cwd: str) -> str:
         _write_builder_state(
             jobs,
             registry,
-            builder_name=builder_name,
+            builder_name=name,
             registry_ca_fingerprint=registry_ca_fingerprint,
         )
     except Exception:
-        _docker(["buildx", "rm", "--force", builder_name], cwd=cwd, check=False)
+        _docker(["buildx", "rm", "--force", name], cwd=cwd, check=False)
         raise
     finally:
         if buildkit_config is not None:
             buildkit_config.cleanup()
-    return builder_name
+    return name
 
 
 def _validate_artifact_manifest(service: Service, manifest: str | None, cwd: str) -> None:
@@ -294,20 +319,43 @@ def build_service(
     *,
     preserve_previous: bool = True,
     artifact_manifest: str | None = None,
+    reuse_existing: bool = False,
+    active_tag: str = "dev",
+    previous_tag: str = "previous",
+    cache_tag: str = "buildcache",
+    buildkit_reserved_space: str | None = None,
+    buildkit_max_used_space: str | None = None,
+    buildkit_min_free_space: str | None = None,
 ) -> str:
     # Validate the builder selector before any pull/tag/push side effects.
     _configured_builder_name()
     image = f"{service.image_repository}:{tag}"
-    cache = f"{service.image_repository}:buildcache"
+    cache = f"{service.image_repository}:{cache_tag}"
     jobs = build_jobs()
     _validate_artifact_manifest(service, artifact_manifest, cwd)
     try:
+        # Candidate tags are content-addressed by source SHA and immutable in
+        # Harbor. Reusing an existing candidate makes workflow retries
+        # idempotent without rebuilding or attempting to overwrite the tag.
+        if reuse_existing:
+            try:
+                image_digest(image, cwd=cwd)
+                return image
+            except BuildError:
+                pass
         if preserve_previous:
-            current = _docker(["pull", f"{service.image_repository}:dev"], cwd=cwd, check=False)
+            current = _docker(["pull", f"{service.image_repository}:{active_tag}"], cwd=cwd, check=False)
             if current.returncode == 0:
-                _docker(["tag", f"{service.image_repository}:dev", f"{service.image_repository}:previous"], cwd=cwd)
-                _docker(["push", f"{service.image_repository}:previous"], cwd=cwd)
-        builder = _ensure_builder(service, jobs, cwd)
+                _docker(["tag", f"{service.image_repository}:{active_tag}", f"{service.image_repository}:{previous_tag}"], cwd=cwd)
+                _docker(["push", f"{service.image_repository}:{previous_tag}"], cwd=cwd)
+        builder = _ensure_builder(
+            service,
+            jobs,
+            cwd,
+            reserved_space=buildkit_reserved_space,
+            max_used_space=buildkit_max_used_space,
+            min_free_space=buildkit_min_free_space,
+        )
         _docker([
             "buildx", "build", "--builder", builder, "--push", "--provenance=false", "--sbom=false",
             "--file", service.dockerfile, "--tag", image,
@@ -322,12 +370,17 @@ def build_service(
 
 
 def promote_candidate(service: Service, candidate_tag: str, cwd: str = ".") -> None:
-    """Promote a registry candidate without loading it into the local daemon."""
-    source = f"{service.image_repository}:{candidate_tag}"
-    target = f"{service.image_repository}:dev"
+    """Backward-compatible wrapper for Harbor API tag promotion.
+
+    The ``cwd`` argument is retained for callers of the old helper, but image
+    promotion deliberately never talks to a local Docker daemon.
+    """
+    del cwd
+    source = ImageRef.parse(f"{service.image_repository}:{candidate_tag}")
+    target = ImageRef.parse(f"{service.image_repository}:dev")
     try:
-        _docker(["buildx", "imagetools", "create", "--tag", target, source], cwd=cwd)
-    except subprocess.CalledProcessError as exc:
+        HarborClient(source.registry).promote_tag(source, target)
+    except HarborError as exc:
         raise BuildError(f"cannot promote candidate for {service.name}") from exc
 
 
@@ -347,20 +400,20 @@ def image_digest(image: str, cwd: str = ".") -> str:
     raise BuildError(f"cannot resolve digest for {image}")
 
 
-def discard_previous(service: Service, cwd: str = ".") -> None:
-    _docker(["push", f"{service.image_repository}:dev"], cwd=cwd)
-    _docker(["rmi", f"{service.image_repository}:previous"], cwd=cwd, check=False)
+def discard_previous(service: Service, cwd: str = ".", active_tag: str = "dev", previous_tag: str = "previous") -> None:
+    _docker(["push", f"{service.image_repository}:{active_tag}"], cwd=cwd)
+    _docker(["rmi", f"{service.image_repository}:{previous_tag}"], cwd=cwd, check=False)
 
 
-def delete_previous(service: Service, registry: str) -> None:
-    HarborClient(registry).delete_tag(ImageRef.parse(f"{service.image_repository}:previous"))
+def delete_previous(service: Service, registry: str, previous_tag: str = "previous") -> None:
+    HarborClient(registry).delete_tag(ImageRef.parse(f"{service.image_repository}:{previous_tag}"))
 
 
-def restore_previous(service: Service, cwd: str = ".") -> None:
+def restore_previous(service: Service, cwd: str = ".", active_tag: str = "dev", previous_tag: str = "previous") -> None:
     try:
-        _docker(["pull", f"{service.image_repository}:previous"], cwd=cwd)
-        _docker(["tag", f"{service.image_repository}:previous", f"{service.image_repository}:dev"], cwd=cwd)
-        _docker(["push", f"{service.image_repository}:dev"], cwd=cwd)
+        _docker(["pull", f"{service.image_repository}:{previous_tag}"], cwd=cwd)
+        _docker(["tag", f"{service.image_repository}:{previous_tag}", f"{service.image_repository}:{active_tag}"], cwd=cwd)
+        _docker(["push", f"{service.image_repository}:{active_tag}"], cwd=cwd)
     except subprocess.CalledProcessError as exc:
         raise BuildError(f"cannot restore previous image for {service.name}") from exc
 
@@ -368,6 +421,14 @@ def restore_previous(service: Service, cwd: str = ".") -> None:
 def prewarm_base_images(base_images: tuple[tuple[str, str], ...], cwd: str = ".") -> None:
     for source, destination in base_images:
         try:
+            # The destination is a shared cache tag. Reusing it when present
+            # keeps repeated or concurrent workflows from trying to overwrite
+            # an immutable Harbor tag.
+            try:
+                image_digest(destination, cwd=cwd)
+                continue
+            except BuildError:
+                pass
             _docker(["pull", source], cwd=cwd)
             _docker(["tag", source, destination], cwd=cwd)
             _docker(["push", destination], cwd=cwd)

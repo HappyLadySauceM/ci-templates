@@ -8,7 +8,10 @@
 harbor.happyladysauce.local/knowledge-core/ci-templates:vMAJOR.MINOR.PATCH
 ```
 
-生产 workflow **按 digest pin** 该镜像。`ci-templates-publish` 在推到 `main` 且相关路径变更时，把 `VERSION` 对应的 tag 推到 Harbor；已存在的不可变 tag 会跳过重建。
+同一发布流程还构建 `harbor.happyladysauce.local/infrastructure/hls-actions-runner:<runner_version>`，供 ARC 的两个 Scale Set 使用；runner 镜像内固定 GitHub Actions runner、kubectl、Helm、Rust 工具链和本包 CLI。
+
+ARC controller 镜像按 digest pin；runner 镜像使用版本 tag，并要求 Harbor 对该仓库启用不可变 tag。
+`ci-templates-publish` 在推到 `main` 且相关路径变更时，把 `VERSION` 对应的 tag 推到 Harbor；已存在的不可变 tag 会跳过重建。
 
 本控制流**不扫描、不签名**镜像。凭据只放在 runner 或部署 Secret 管理器里；密码、token、私钥不得出现在 JSON、YAML、源码、日志或 Release 正文。发布摘要只消费一份有界、已脱敏的 diff 上下文（临时文件）。commit、分支、workflow 和凭据元数据不会发给 DeepSeek，也不会写入 Release。
 
@@ -26,13 +29,10 @@ GitOps 真源与「谁改哪」见 [deploy 文档](https://github.com/HappyLadyS
 
 ## 命令地图
 
-`ENTRYPOINT` 是 `ci-templates`。workflow 里典型调用：
+`ENTRYPOINT` 是 `ci-templates`；ARC runner 镜像直接提供同名 CLI，workflow 不再依赖宿主机 Docker socket。workflow 里典型调用：
 
 ```text
-docker run --rm --network host \
-  -v "$GITHUB_WORKSPACE:/workspace" \
-  -e CI_PROJECT_CONFIG_JSON \
-  -w /workspace "$CI_IMAGE" <command>
+ci-templates <command> --config .ci/pipeline.yaml
 ```
 
 | 命令 | 作用 |
@@ -73,9 +73,10 @@ docker run --rm --network host \
 
 ## 构建并行与制品
 
-镜像构建默认复用名为 `ci-templates` 的稳定 Buildx builder，以便同一 runner 上跨服务保留 BuildKit cache。需要在同一 Docker daemon 上隔离不同流水线时，可通过 `CI_BUILDER_NAME` 指定仅含字母、数字、`.`, `_`, `-` 且不超过 63 个字符的 builder 名；每个名称使用独立的资源 marker。未设置时保持 `ci-templates` 及其原有 marker 路径不变。编译并行默认是 runner 有效 CPU（亲和性与 cgroup 配额）的 75%，至少 1。用 `BUILD_CPU_PERCENT` 调整比例；`BUILD_JOBS` 仅作有界紧急覆盖。BuildKit GC 按配置水位回收。设置 `CI_REGISTRY_CA_FILE` 时，marker 只保存 CA 文件的 SHA-256 指纹；CA 内容变化会受控重建 builder，不会写入 marker。
+镜像构建在 `hls-builder` ARC Scale Set 的隔离 Docker-in-Docker 容器中按 service matrix 并行；质量与部署任务在 `hls-standard` Scale Set 中运行。标准池最多 8 个 runner，特权构建池最多 4 个 runner。默认复用名为 `ci-templates` 的稳定 Buildx builder，以便同一 runner 上跨服务保留 BuildKit cache；需要在同一 Docker daemon 上隔离不同流水线时，可通过 `CI_BUILDER_NAME` 指定仅含字母、数字、`.`, `_`, `-` 且不超过 63 个字符的 builder 名，每个名称使用独立的资源 marker。未设置时保持 `ci-templates` 及其原有 marker 路径不变。编译并行默认是 runner 有效 CPU（亲和性与 cgroup 配额）的 75%，至少 1。用 `BUILD_CPU_PERCENT` 调整比例；`BUILD_JOBS` 仅作有界紧急覆盖。BuildKit GC 按配置水位回收。设置 `CI_REGISTRY_CA_FILE` 时，marker 只保存 CA 文件的 SHA-256 指纹；CA 内容变化会受控重建 builder，不会写入 marker。
 
 `build` 可接收一份经 SHA256 校验的 artifact manifest，让只负责打包的 Dockerfile 使用质量作业已经编好的二进制，而不再编译一次。
+候选 tag 按源 commit 命名且在 Harbor 中设为不可变；工作流重试会通过 `--reuse-existing` 复用已存在的候选 manifest。
 
 ## 本地验证
 

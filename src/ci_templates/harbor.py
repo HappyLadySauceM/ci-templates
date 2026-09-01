@@ -100,3 +100,53 @@ class HarborClient:
             return
         repo_path = quote(repository, safe="")
         self._request("DELETE", f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(digest, safe='')}/tags/{quote(image.tag, safe='')}")
+
+    def promote_tag(self, source: ImageRef, destination: ImageRef) -> str:
+        """Move a candidate tag to the active tag without pulling the image.
+
+        Harbor stores tags as references to immutable manifests.  Promotion is
+        therefore a small API operation and does not require a Docker daemon
+        (or a privileged runner) to be available.
+        """
+        if source.registry != destination.registry or source.repository != destination.repository:
+            raise HarborError("source and destination must reference the same image repository")
+        digest = self.manifest_digest(source)
+        if not digest:
+            raise HarborError(f"source image does not exist: {source.tag_ref}")
+        existing = self.manifest_digest(destination)
+        if existing == digest:
+            return digest
+        if existing:
+            self.delete_tag(destination)
+        parts = destination.repository.split("/", 1)
+        if len(parts) != 2:
+            raise HarborError("repository must be project/name for tag promotion")
+        project, repository = parts
+        repo_path = quote(repository, safe="")
+        try:
+            self._request(
+                "POST",
+                f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(digest, safe='')}/tags",
+                body={"name": destination.tag},
+            )
+            promoted = self.manifest_digest(destination)
+            if promoted != digest:
+                raise HarborError(f"Harbor promotion verification failed for {destination.tag_ref}")
+        except HarborError:
+            # Deleting an existing active tag is the one non-idempotent step.
+            # If the new tag cannot be attached, restore the old reference so
+            # a transient Harbor/API failure cannot leave the service without
+            # its last known-good active image.
+            if existing:
+                try:
+                    self._request(
+                        "POST",
+                        f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(existing, safe='')}/tags",
+                        body={"name": destination.tag},
+                    )
+                except HarborError as restore_exc:
+                    raise HarborError(
+                        f"Harbor promotion failed and restoring {destination.tag_ref} failed"
+                    ) from restore_exc
+            raise
+        return digest

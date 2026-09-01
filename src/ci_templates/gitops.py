@@ -21,15 +21,18 @@ def _git(args: list[str], *, cwd: str | Path | None = None, check: bool = True, 
     return subprocess.run(["git", *args], cwd=cwd, check=check, env=env, stdout=sys.stderr, text=True)
 
 
-def _configure_identity(worktree: Path) -> None:
-    _git(["config", "user.name", "knowledge-core-ci"], cwd=worktree)
-    _git(["config", "user.email", "knowledge-core-ci@noreply.local"], cwd=worktree)
+def _configure_identity(worktree: Path, name: str = "ci-bot", email: str = "ci-bot@noreply.local") -> None:
+    _git(["config", "user.name", name], cwd=worktree)
+    _git(["config", "user.email", email], cwd=worktree)
 
 
 def sync_snapshot(source_root: str | Path, snapshot_root: str | Path) -> None:
     source = Path(source_root).resolve()
     target = Path(snapshot_root).resolve()
-    if source == target or source not in source.parents and target in source.parents:
+    # The copy must not target the source itself, an ancestor, or a descendant.
+    # Otherwise ``copytree`` can delete its own input or recurse into the newly
+    # created destination while synchronizing a local GitOps checkout.
+    if source == target or source in target.parents or target in source.parents:
         raise GitOpsError("source and snapshot paths overlap unsafely")
     if not source.is_dir():
         raise GitOpsError(f"deploy source does not exist: {source}")
@@ -61,7 +64,18 @@ def update_images(kustomization: str | Path, overrides: dict[str, dict[str, str]
     path.write_text(yaml.safe_dump(document, sort_keys=False, allow_unicode=False), encoding="utf-8")
 
 
-def promote_snapshot(source_deploy: str | Path, gitops_repo: str, gitops_path: str, kustomization: str, branch: str, source_sha: str, image_overrides: dict[str, dict[str, str]] | None = None) -> tuple[str, str]:
+def promote_snapshot(
+    source_deploy: str | Path,
+    gitops_repo: str,
+    gitops_path: str,
+    kustomization: str,
+    branch: str,
+    source_sha: str,
+    image_overrides: dict[str, dict[str, str]] | None = None,
+    *,
+    identity_name: str = "ci-bot",
+    identity_email: str = "ci-bot@noreply.local",
+) -> tuple[str, str]:
     """Copy deploy source into the GitOps repo and publish a fast-forward snapshot."""
     source = Path(source_deploy).resolve()
     if not source.is_dir():
@@ -84,13 +98,15 @@ def promote_snapshot(source_deploy: str | Path, gitops_repo: str, gitops_path: s
                 update_images(worktree / gitops_path / kustomization, image_overrides)
             marker = worktree / gitops_path / ".source-revision"
             marker.write_text(source_sha.strip() + "\n", encoding="utf-8")
-            _configure_identity(worktree)
-            _git([
-                "add",
+            _configure_identity(worktree, identity_name, identity_email)
+            add_paths = [
                 str(Path(gitops_path) / "deploy"),
                 str(Path(gitops_path) / ".source-revision"),
-                str(Path(gitops_path) / kustomization),
-            ], cwd=worktree)
+            ]
+            kustomization_path = worktree / gitops_path / kustomization
+            if kustomization_path.is_file():
+                add_paths.append(str(Path(gitops_path) / kustomization))
+            _git(["add", *add_paths], cwd=worktree)
             changed = _git(["diff", "--cached", "--quiet"], cwd=worktree, check=False)
             if changed.returncode == 0:
                 return base_revision, base_revision
@@ -107,7 +123,14 @@ def promote_snapshot(source_deploy: str | Path, gitops_repo: str, gitops_path: s
     raise GitOpsError("GitOps branch moved during snapshot promotion after 3 attempts") from last_push_error
 
 
-def rollback_snapshot(gitops_repo: str, branch: str, revision: str) -> str:
+def rollback_snapshot(
+    gitops_repo: str,
+    branch: str,
+    revision: str,
+    *,
+    identity_name: str = "ci-bot",
+    identity_email: str = "ci-bot@noreply.local",
+) -> str:
     """Revert one CI snapshot commit and push it as a normal fast-forward."""
     if not revision:
         raise GitOpsError("rollback revision is required")
@@ -123,7 +146,7 @@ def rollback_snapshot(gitops_repo: str, branch: str, revision: str) -> str:
         head = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
         if head != revision:
             raise GitOpsError("GitOps branch moved before rollback; refusing to overwrite it")
-        _configure_identity(worktree)
+        _configure_identity(worktree, identity_name, identity_email)
         _git(["revert", "--no-edit", revision], cwd=worktree)
         _git([*git_args, "push", "origin", f"HEAD:{branch}"], cwd=worktree, env=git_env)
         return subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()

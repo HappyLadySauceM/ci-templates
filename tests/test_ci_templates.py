@@ -769,6 +769,15 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertIn(f"BUILD_JOBS={build_jobs()}", build_args)
         self.assertFalse(any(args.args[0][:2] == ["buildx", "rm"] for args in docker.call_args_list))
 
+    @patch("ci_templates.build.image_digest", return_value="sha256:" + "a" * 64)
+    @patch("ci_templates.build._docker")
+    def test_build_reuses_existing_immutable_candidate(self, docker, digest):
+        image = build_service(config().services[0], tag="sha-abc", reuse_existing=True)
+
+        self.assertEqual(image, "org/gateway:sha-abc")
+        digest.assert_called_once_with(image, cwd=".")
+        docker.assert_not_called()
+
     @patch("ci_templates.build._builder_matches", return_value=True)
     @patch("ci_templates.build._docker")
     def test_first_build_does_not_require_previous_image(self, docker, builder_matches):
