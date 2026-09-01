@@ -15,6 +15,18 @@ maxRunners: 2
 imagePullSecrets:
   - name: arc-registry-pull
 containerMode: {}
+listenerTemplate:
+  spec:
+    securityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    containers:
+      - name: listener
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
 template:
   metadata:
     labels:
