@@ -81,7 +81,7 @@
 | `git_identity_name` / `git_identity_email` | 否 | `ci-bot` / `ci-bot@noreply.local` | GitOps 提交身份 |
 | `status_context` | 否 | `<project-slug>/smoke` | GitHub commit status context |
 | `buildkit_reserved_space` / `buildkit_max_used_space` / `buildkit_min_free_space` | 否 | `2GB` / `8GB` / `50GB` | BuildKit GC 水位 |
-| `control_image_repository` / `runner_image_repository` / `runner_version` | 否 | 空 / 空 / `2.333.0` | CI 控制镜像与 ARC runner 镜像坐标 |
+| `control_image_repository` / `runner_image_repository` / `runner_version` | 否 | 空 / 空 / `2.337.0` | CI 控制镜像与 ARC runner 镜像坐标 |
 
 ## Service 字段
 

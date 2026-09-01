@@ -116,7 +116,7 @@ class Pipeline:
     buildkit_min_free_space: str = "50GB"
     control_image_repository: str = ""
     runner_image_repository: str = ""
-    runner_version: str = "2.333.0"
+    runner_version: str = "2.337.0"
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "Pipeline":
@@ -210,7 +210,7 @@ class Pipeline:
             "buildkit_min_free_space": "50GB",
             "control_image_repository": "",
             "runner_image_repository": "",
-            "runner_version": "2.333.0",
+            "runner_version": "2.337.0",
         }
         configured_strings = {field: value.get(field, default) for field, default in string_defaults.items()}
         for field, field_value in configured_strings.items():
