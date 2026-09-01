@@ -24,6 +24,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Ubuntu's docker.io package may already reserve the `docker` group with a
+# distribution-specific GID. The builder sidecar deliberately exposes its
+# socket as GID 123, so create or reuse whichever group owns that GID instead
+# of assuming that the name is available.
 RUN sed -i "s#http://archive.ubuntu.com/ubuntu#${UBUNTU_MIRROR}#g; s#http://security.ubuntu.com/ubuntu#${UBUNTU_MIRROR}#g" /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -37,9 +41,10 @@ RUN sed -i "s#http://archive.ubuntu.com/ubuntu#${UBUNTU_MIRROR}#g; s#http://secu
        libxfixes3 libxkbcommon0 libxrandr2 libxshmfence1 xvfb \
        fonts-liberation fonts-noto-color-emoji fonts-unifont \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 123 docker \
+    && socket_group="$(getent group 123 | cut -d: -f1 || true)" \
+    && if [ -z "$socket_group" ]; then groupadd --gid 123 docker-socket; socket_group=docker-socket; fi \
     && groupadd --gid 1001 runner \
-    && useradd --uid 1001 --gid 1001 --groups docker --create-home --shell /bin/bash runner \
+    && useradd --uid 1001 --gid 1001 --groups "$socket_group" --create-home --shell /bin/bash runner \
     && arch="$(dpkg --print-architecture)" \
     && test "$arch" = amd64 \
     && curl --fail --silent --show-error --location \

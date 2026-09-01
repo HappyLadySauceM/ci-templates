@@ -10,6 +10,8 @@ ci-templates charts-mirror --manifest k3s/charts.lock.yaml --root .
 在 deploy 仓库根执行。`charts-mirror` 会先跑与 `charts-check` 相同的门禁，通过后再推 OCI 并刷新可选 vendor。
 
 Registry 登录走 Helm 运行时配置（runner 的 Docker/Helm 凭据），**不是**锁文件字段。
+该命令在受信任宿主机或 runner 上执行，所以 `destination` 使用外部 registry 主机名；
+集群内 Argo CD 的读取地址统一为 `harbor.harbor.svc.cluster.local/helm`。
 
 ## Manifest version 1
 
@@ -70,4 +72,6 @@ charts:
 
 ## 与 Argo CD 的关系
 
-多数平台组件的 ApplicationSet `appType` 为 `helm` 或 `helmValues`，从 `harbor.happyladysauce.local/helm` 拉 Chart。Harbor 自身是例外：vendor 进 Git，`appType: gitHelm`。升级与回滚步骤见 [deploy 变更指南](https://github.com/HappyLadySauceM/deploy/blob/main/docs/change-guide.md) 与 [deploy 运维](https://github.com/HappyLadySauceM/deploy/blob/main/docs/operations.md)。
+多数平台组件的 ApplicationSet `appType` 为 `helm` 或 `helmValues`，从
+`harbor.harbor.svc.cluster.local/helm` 拉 Chart。Harbor 自身是例外：vendor 进 Git，
+`appType: gitHelm`。升级与回滚步骤见 [deploy 变更指南](https://github.com/HappyLadySauceM/deploy/blob/main/docs/change-guide.md) 与 [deploy 运维](https://github.com/HappyLadySauceM/deploy/blob/main/docs/operations.md)。
