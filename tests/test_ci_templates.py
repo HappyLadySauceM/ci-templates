@@ -834,13 +834,18 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertIn(f'[registry."org"]\n  ca = ["{ca_path}"]\n', observed[0])
 
     def test_build_jobs_uses_cpu_ratio_and_respects_affinity(self):
-        with patch("ci_templates.build.os.sched_getaffinity", return_value=set(range(8))):
+        # Isolate affinity calculations from the cgroup quota of whichever
+        # runner executes the test suite.
+        with patch("ci_templates.build._quota_cpus", return_value=None), \
+                patch("ci_templates.build.os.sched_getaffinity", return_value=set(range(8))):
             self.assertEqual(build_jobs(), 6)
-        with patch("ci_templates.build.os.sched_getaffinity", return_value={0}):
+        with patch("ci_templates.build._quota_cpus", return_value=None), \
+                patch("ci_templates.build.os.sched_getaffinity", return_value={0}):
             self.assertEqual(build_jobs(), 1)
 
     def test_build_jobs_uses_configured_cpu_percentage_and_override(self):
-        with patch("ci_templates.build.os.sched_getaffinity", return_value=set(range(8))):
+        with patch("ci_templates.build._quota_cpus", return_value=None), \
+                patch("ci_templates.build.os.sched_getaffinity", return_value=set(range(8))):
             with patch.dict("ci_templates.build.os.environ", {"BUILD_CPU_PERCENT": "50"}, clear=False):
                 self.assertEqual(build_jobs(), 4)
             with patch.dict("ci_templates.build.os.environ", {"BUILD_CPU_PERCENT": "101"}, clear=False):
