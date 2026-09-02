@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib
 import io
 import tarfile
+import tempfile
 import subprocess
 import sys
 from unittest.mock import call, patch
@@ -525,6 +526,28 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertEqual(env["GIT_CONFIG_KEY_0"], "credential.helper")
         self.assertIn("$GITHUB_TOKEN", env["GIT_CONFIG_VALUE_0"])
         self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+
+    @patch.dict("ci_templates.github.os.environ", {"GITHUB_TOKEN": "test-token"}, clear=False)
+    @patch("ci_templates.github.subprocess.run")
+    def test_main_promotion_unshallows_before_ancestor_check(self, run):
+        # deploy-release checkouts use fetch-depth: 1, so origin/main is not
+        # reachable until the clone is unshallowed.
+        # deploy-release 使用 fetch-depth: 1，不 unshallow 就无法判断 origin/main 是否祖先。
+        run.return_value = subprocess.CompletedProcess([], 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            git_dir = Path(tmp) / ".git"
+            git_dir.mkdir()
+            (git_dir / "shallow").write_text("deadbeef\n", encoding="utf-8")
+            fast_forward_main(cwd=tmp)
+
+        self.assertEqual([item.args[0] for item in run.call_args_list], [
+            ["git", "config", "user.name", "happyladysauce-ci"],
+            ["git", "config", "user.email", "happyladysauce-ci@noreply.local"],
+            ["git", "fetch", "--unshallow", "origin"],
+            ["git", "fetch", "origin", "main", "dev"],
+            ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+            ["git", "push", "origin", "HEAD:main"],
+        ])
 
     @patch.dict("ci_templates.github.os.environ", {"GITHUB_TOKEN": "test-token"}, clear=False)
     @patch("ci_templates.github.subprocess.run")

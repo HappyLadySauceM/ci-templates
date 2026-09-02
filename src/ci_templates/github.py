@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -95,6 +96,12 @@ def fast_forward_main(
 ) -> None:
     env = _git_environment()
     _configure_identity(cwd, env, identity_name, identity_email)
+    # actions/checkout fetch-depth: 1 leaves .git/shallow, so origin/main is
+    # not an ancestor of HEAD until the clone is unshallowed.
+    # actions/checkout 的 fetch-depth: 1 会留下 .git/shallow，不 unshallow
+    # 就无法证明 origin/main 是 HEAD 的祖先。
+    if (Path(cwd) / ".git" / "shallow").is_file():
+        subprocess.run(["git", "fetch", "--unshallow", "origin"], cwd=cwd, check=True, env=env)
     fetch_branches = ["origin", branch]
     if development_branch != branch:
         fetch_branches.append(development_branch)
