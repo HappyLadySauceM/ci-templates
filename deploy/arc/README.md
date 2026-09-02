@@ -9,10 +9,8 @@ policy; no credential belongs here.
 The controller is installed in `arc-system`. Runner pods are split between
 `arc-runners-standard` (direct runner pods, max four at 8 CPU / 8 GiB each) and
 `arc-runners-builder` (privileged Docker-in-Docker, max one at 24 CPU / 14 GiB:
-DinD `"12"` / 12 GiB plus runner `"12"` / 2 GiB).
-The
-two pools must be scheduled only on nodes labelled
-`workload.happyladysauce.local/ci=true`.
+DinD `"12"` / 12 GiB plus runner `"12"` / 2 GiB). The two pools must be
+scheduled only on nodes labelled `workload.happyladysauce.local/ci=true`.
 
 Before enabling the ApplicationSet, the deploy repository must contain the
 SOPS-managed `arc-github-app` Secret in both runner namespaces. Its data keys
