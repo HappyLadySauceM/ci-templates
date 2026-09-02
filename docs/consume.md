@@ -177,9 +177,8 @@ Webhook POST `https://open.feishu.cn/open-apis/bot/v2/hook/<id>`。签名按飞�
 
 1. 先把本仓库（含 Action）推到 `origin/main`。
 2. 应用仓复制 [`.github/workflows/feishu-notify.yml`](../.github/workflows/feishu-notify.yml)，
-   把 `uses:` 钉成该 Action 所在提交的 40 位 SHA。CI 卡片改动进 `origin/main` 之后，把
-   Knowledge-Core / Web / Skill-Constructor 的 pin 从
-   `2d06b38ff477b97b93bbd0ee7a7e51d5724d3cfe` 换成新 SHA。本仓自己的 notify
+   把 `uses:` 钉成该 Action 所在提交的 40 位 SHA（当前为
+   `91a1f006e0e24ae7ae8d5d98e78f41fa8e06b69e`）。本仓自己的 notify
    workflow 和 `publish.yml` 末尾 job 用 `uses: ./.github/actions/feishu-notify`，先 checkout。
 3. 本地验证 Action：`PYTHONPATH=src python3 -m unittest tests.test_feishu_notify -v`
 4. 在已接入仓上 `workflow_dispatch` 一次 `feishu-notify`，确认群里出现卡片。
