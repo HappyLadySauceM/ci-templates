@@ -14,6 +14,20 @@ class HarborError(RuntimeError):
     pass
 
 
+# Active tags such as :dev are often a manifest list/index, not a single image
+# manifest. Asking only for OCI image manifests makes registry HEAD return 404,
+# so promotion skips delete and POST /tags conflicts (409).
+# :dev 这类活跃 tag 经常是 manifest list/index 而不是单层 image manifest。
+# 只请求 OCI image manifest 时 registry HEAD 会 404，promote 跳过删除后
+# POST /tags 就会 409。
+_MANIFEST_ACCEPT = (
+    "application/vnd.oci.image.index.v1+json, "
+    "application/vnd.docker.distribution.manifest.list.v2+json, "
+    "application/vnd.oci.image.manifest.v1+json, "
+    "application/vnd.docker.distribution.manifest.v2+json"
+)
+
+
 @dataclass(frozen=True)
 class ImageRef:
     registry: str
@@ -83,7 +97,7 @@ class HarborClient:
     def manifest_digest(self, image: ImageRef) -> str | None:
         path = f"/v2/{image.repository}/manifests/{quote(image.tag, safe='') }"
         try:
-            _, headers, _ = self._request("HEAD", path, accept="application/vnd.oci.image.manifest.v1+json")
+            _, headers, _ = self._request("HEAD", path, accept=_MANIFEST_ACCEPT)
         except HarborError as exc:
             if "HTTP Error 404" in str(exc):
                 return None
