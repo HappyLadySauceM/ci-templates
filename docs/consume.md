@@ -1,6 +1,7 @@
 # 消费指南
 
-给要接入或修改应用仓库流水线的人。当前已接入的例子：Knowledge-Core 与
+给要接入或修改应用仓库流水线的人。ARC 池、`runs-on` 标签和 GitOps 路径见
+[ARC 实现](arc.md)。当前已接入的例子：Knowledge-Core 与
 Knowledge-Core-Web 的 `.github/workflows/pipeline.yml`。
 
 ## 项目仓库保留什么
@@ -46,7 +47,7 @@ push dev
    GitHub Artifacts 跨 job 传递，不依赖宿主机目录。
 2. `hls-standard` 只执行质量、GitOps、Argo 和 smoke；`hls-builder` 才允许
    Docker-in-Docker 特权构建。matrix 的 `max-parallel` 不得超过 builder
-   Scale Set 的 `maxRunners: 1`。
+   Scale Set 的 `maxRunners: 1`。池容量与缓存见 [ARC 实现](arc.md)。
 3. `build --tag sha-<GITHUB_SHA> --reuse-existing` 使用不可变 candidate；
    重试时复用已存在的远端 manifest，避免覆盖 tag。
 4. `promote-snapshot` 以 GitOps 分支头为 CAS，远端前进时重新 clone 并重试；
@@ -63,8 +64,8 @@ push dev
 
 | Runner / Secret | 用途 |
 | --- | --- |
-| `hls-standard`（当前最多 5） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup |
-| `hls-builder`（当前最多 1） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
+| `hls-standard`（当前最多 4，各 8 CPU / 8Gi） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup |
+| `hls-builder`（当前最多 1，DinD 12 CPU / 12Gi + runner 12 CPU / 2Gi） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
 | `arc-github-app` | ARC 在每个 runner namespace 注册 ephemeral runner |
 | `HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM` | Harbor pull/push 与 TLS |
 | `K3S_RELEASE_KUBECONFIG` | deploy-release 的集群访问 |
@@ -79,9 +80,11 @@ push dev
 | `CI_REGISTRY_CA_FILE` | 可选的 Harbor CA 文件；内容指纹变化会触发 builder 重建 |
 
 标准 runner 不挂宿主机 Docker socket；builder 使用 Pod 内隔离的 Docker-in-
-Docker，并将 Harbor CA 以 Secret 挂入 daemon。每个 runner Pod 的 workspace、
-BuildKit cache 和 runner 临时目录都是 ephemeral；不要在 workflow 中写
-`/opt/actions-runner`、`/etc/rancher/k3s`、`/var/lib/rancher` 或宿主机 `_cache`。
+Docker，并将 Harbor CA 以 Secret 挂入 daemon。每个 runner Pod 的 workspace
+和 runner 临时目录都是 ephemeral。节点语言/工具缓存在 `/var/lib/hls-ci-cache`，
+由 ARC 挂到 `/cache`，workflow 不要自己去挂，也不要启用 GitHub Actions cache。
+不要在 workflow 中写 `/opt/actions-runner`、`/etc/rancher/k3s`、
+`/var/lib/rancher` 或宿主机 `_cache`。
 
 GitHub environment secrets 需要在所有读取它们的 job 上声明
 `environment: release`。ARC 的 GitHub App 只授予 organization
@@ -103,17 +106,23 @@ BuildKit cache。需要在同一 Docker daemon 上隔离不同流水线时，可
 `hls-builder` 自举。
 
 controller 镜像使用 digest pin；runner tag 必须在 Harbor 启用不可变 tag。ARC
-values、namespace、Secret、专用 CI 节点和 chart mirror 由 deploy 仓库管理，
-不要把私钥或账号写入 values。
+values、namespace、Secret、专用 CI 节点和 chart mirror 的职责划分见
+[ARC 实现](arc.md)，不要把私钥或账号写入 values。
 
-## Pin 控制镜像
+## 控制镜像（非 ARC 场景）
+
+接在 `hls-standard` / `hls-builder` 上的应用 workflow **直接调用 runner 镜像里的
+`ci-templates` CLI**，不必设置 `CI_IMAGE`，也不必开 PR 去 pin 控制镜像 digest。
+
+只有在不用 ARC runner 镜像、仍要单独 `docker run` 控制镜像时，才 pin digest：
 
 ```yaml
 env:
   CI_IMAGE: harbor.happyladysauce.local/knowledge-core/ci-templates:v1.1.12@sha256:...
 ```
 
-本仓库 `ci-templates-publish` 成功后会在 job summary 打出 `image@digest`。消费方必须开 PR 更新 `CI_IMAGE`。未 pin digest 的 tag 不得用于生产 workflow。
+本仓库 `ci-templates-publish` 成功后会在 job summary 打出 `image@digest`。未 pin
+digest 的可变 tag 不得用于那种非 ARC 的生产调用。
 
 ## 本地试跑
 

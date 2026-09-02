@@ -25,16 +25,15 @@ ci-templates 是组织的 CI/CD 控制面；应用仓库只保留薄 workflow �
 
 ## ARC 运行池
 
-| 池 | Namespace | 最大 runner | 用途 |
-| --- | --- | ---: | --- |
-| `hls-standard` | `arc-runners-standard` | 8 | 质量、部署、Argo、smoke、清理 |
-| `hls-builder` | `arc-runners-builder` | 4 | 特权 Docker-in-Docker 构建与 prewarm |
-| controller | `arc-system` | 2 replicas | 管理两个 Scale Set |
+组织 self-hosted runner 由 ARC Scale Set 提供，叙事真源见 [ARC 实现](arc.md)。
+当前 `maxRunners`：`hls-standard` 4（每 Pod 8 CPU / 8Gi），`hls-builder` 1
+（DinD `"12"` / 12Gi + runner `"12"` / 2Gi）。两个池调度到
+`workload.happyladysauce.local/ci=true`；standard 不挂宿主机 socket，builder
+的 privileged 只存在于隔离 namespace。
 
-两个池调度到带 `workload.happyladysauce.local/ci=true:NoSchedule` 的专用节点；
-标准池不挂宿主机 socket，builder 的 privileged 只存在于隔离 namespace。ARC
-values 的非密钥真源在 [deploy/arc](../deploy/arc/)，由 ci-templates 发布时同步
-到 deploy 仓库。
+非密钥 values 在 [deploy/arc](../deploy/arc/)，由 `ci-templates-publish` 同步到
+deploy 仓库。集群 Secret 与节点引导见
+[deploy/docs/ci-runners.md](https://github.com/HappyLadySauceM/deploy/blob/main/docs/ci-runners.md)。
 
 ## 镜像与 GitOps
 
@@ -58,6 +57,6 @@ environment；不写入 workflow、日志、artifact 或 Release 正文。
 ## 控制镜像发布
 
 `ci-templates-publish` 在 `main` 变更后运行测试、构建控制/runner 镜像，并将
-controller 镜像从 GHCR 按 digest 镜像到 Harbor。第一次迁移可由受信任旧 runner
-或管理员工作站 bootstrap runner 镜像；之后发布 workflow 使用 `hls-builder`
-自举。
+controller 镜像从 GHCR 按 digest 镜像到 Harbor，再把 `deploy/arc` 快照推到
+deploy。第一次迁移可由受信任旧 runner 或管理员工作站 bootstrap runner 镜像；
+之后发布 workflow 使用 `hls-builder` 自举。详见 [ARC 实现](arc.md)。

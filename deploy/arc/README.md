@@ -1,5 +1,10 @@
 # ARC runner baseline
 
+Narrative (Chinese):
+[ci-templates/docs/arc.md](https://github.com/HappyLadySauceM/ci-templates/blob/main/docs/arc.md).
+Cluster secrets and node bootstrap live in the deploy repository
+[`docs/ci-runners.md`](https://github.com/HappyLadySauceM/deploy/blob/main/docs/ci-runners.md).
+
 This directory is the non-secret source of truth for the organization runner
 scale sets. It is synchronized into the GitOps repository by the
 `ci-templates` release workflow. Environment overlays in `deploy` provide the
