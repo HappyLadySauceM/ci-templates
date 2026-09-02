@@ -109,6 +109,20 @@ template:
             value: unix:///var/run/docker.sock
           - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
             value: "120"
+          # Same node-local caches as hls-standard.
+          # 与 hls-standard 共用节点本地缓存。
+          - name: CARGO_HOME
+            value: /cache/cargo
+          - name: GOMODCACHE
+            value: /cache/go/mod
+          - name: GOCACHE
+            value: /cache/go/build
+          - name: NPM_CONFIG_CACHE
+            value: /cache/npm
+          - name: PLAYWRIGHT_BROWSERS_PATH
+            value: /cache/playwright
+          - name: RUNNER_TOOL_CACHE
+            value: /cache/actions-tools
         envFrom:
           - secretRef:
               name: arc-proxy
@@ -132,6 +146,8 @@ template:
             mountPath: /etc/docker/certs.d/harbor.happyladysauce.local/ca.crt
             subPath: ca.crt
             readOnly: true
+          - name: ci-cache
+            mountPath: /cache
     volumes:
       - name: work
         emptyDir:
@@ -143,3 +159,7 @@ template:
       - name: harbor-ca
         secret:
           secretName: arc-registry-ca
+      - name: ci-cache
+        hostPath:
+          path: /var/lib/hls-ci-cache
+          type: DirectoryOrCreate

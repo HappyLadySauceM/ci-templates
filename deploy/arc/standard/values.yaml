@@ -9,9 +9,9 @@ controllerServiceAccount:
   namespace: arc-system
   name: gha-runner-scale-set-controller-gha-rs-controller
 minRunners: 1
-# Single-node standard pool cap: five runners at 6 GiB each. Add dedicated CI
-# workers before increasing this limit further.
-maxRunners: 5
+# Single-node pool: four 8 CPU / 8Gi runners. Namespace quota is 32 CPU / 32Gi.
+# 单节点池：4 个 8 CPU / 8Gi runner。namespace 配额为 32 CPU / 32Gi。
+maxRunners: 4
 imagePullSecrets:
   - name: arc-registry-pull
 containerMode: {}
@@ -47,6 +47,8 @@ template:
       runAsNonRoot: true
       runAsUser: 1001
       runAsGroup: 1001
+      fsGroup: 1001
+      fsGroupChangePolicy: OnRootMismatch
       seccompProfile:
         type: RuntimeDefault
     containers:
@@ -56,16 +58,39 @@ template:
         command: ["/home/runner/run.sh"]
         resources:
           requests:
-            cpu: "1"
-            memory: 6Gi
+            cpu: "8"
+            memory: 8Gi
           limits:
-            cpu: "1"
-            memory: 6Gi
+            cpu: "8"
+            memory: 8Gi
+        env:
+          # Node-local caches; do not use GitHub Actions cache (uploads off-cluster).
+          # 节点本地缓存；不要用 GitHub Actions cache（会上传到集群外）。
+          - name: CARGO_HOME
+            value: /cache/cargo
+          - name: GOMODCACHE
+            value: /cache/go/mod
+          - name: GOCACHE
+            value: /cache/go/build
+          - name: NPM_CONFIG_CACHE
+            value: /cache/npm
+          - name: PLAYWRIGHT_BROWSERS_PATH
+            value: /cache/playwright
+          - name: RUNNER_TOOL_CACHE
+            value: /cache/actions-tools
         envFrom:
           - secretRef:
               name: arc-proxy
+        volumeMounts:
+          - name: ci-cache
+            mountPath: /cache
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: false
           capabilities:
             drop: [ALL]
+    volumes:
+      - name: ci-cache
+        hostPath:
+          path: /var/lib/hls-ci-cache
+          type: DirectoryOrCreate
