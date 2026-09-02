@@ -8,7 +8,8 @@ policy; no credential belongs here.
 
 The controller is installed in `arc-system`. Runner pods are split between
 `arc-runners-standard` (direct runner pods, max four at 8 CPU / 8 GiB each) and
-`arc-runners-builder` (privileged Docker-in-Docker, max one at 6 GiB total).
+`arc-runners-builder` (privileged Docker-in-Docker, max one at 24 CPU / 14 GiB:
+DinD `"12"` / 12 GiB plus runner `"12"` / 2 GiB).
 The
 two pools must be scheduled only on nodes labelled
 `workload.happyladysauce.local/ci=true`.
@@ -25,8 +26,8 @@ proxy and no-proxy variables, because listeners run in `arc-system`. These are
 intentionally prerequisites rather than generated here.
 
 Provision dedicated tainted CI workers before raising either cap. The current
-single-node pool reserves 32 CPU / 32 GiB for four standard runners and 6 GiB
-for one builder pod; node hostPath `/var/lib/hls-ci-cache` holds language
+single-node pool reserves 32 CPU / 32 GiB for four standard runners and
+24 CPU / 14 GiB for one builder pod; node hostPath `/var/lib/hls-ci-cache` holds language
 caches. `arc-runners-standard` is Pod Security **privileged** only so four
 runners can share that hostPath (baseline and restricted both forbid it);
 pods still run as uid 1001 with ALL capabilities dropped and without

@@ -79,11 +79,14 @@ template:
           privileged: true
         resources:
           requests:
-            cpu: "7.5"
-            memory: 5Gi
+            # Quoted CPU so Helm/YAML keep a string. Align with the runner
+            # cgroup so build_jobs() matches BuildKit.
+            # CPU 必须加引号。与 runner cgroup 对齐，让 build_jobs() 和 BuildKit 一致。
+            cpu: "12"
+            memory: 12Gi
           limits:
-            cpu: "7.5"
-            memory: 5Gi
+            cpu: "12"
+            memory: 12Gi
         startupProbe:
           exec:
             command: ["docker", "info"]
@@ -130,11 +133,12 @@ template:
           requests:
             # Keep the runner cgroup aligned with the DIND daemon so
             # build_jobs() sees the CPUs that BuildKit can actually use.
-            cpu: "7.5"
-            memory: 1Gi
+            # runner cgroup 与 DinD 对齐，build_jobs() 才能看到 BuildKit 实际可用的核。
+            cpu: "12"
+            memory: 2Gi
           limits:
-            cpu: "7.5"
-            memory: 1Gi
+            cpu: "12"
+            memory: 2Gi
         volumeMounts:
           - name: work
             mountPath: /home/runner/_work
