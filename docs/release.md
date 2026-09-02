@@ -54,7 +54,7 @@ Diff 上下文会脱敏并截断。commit、分支、workflow、凭据元数据�
    - `PYTHONPATH=src python3 -m unittest discover -s tests -v`
    - `python3 -m compileall -q src`
    - 若 `ci-templates:v$VERSION` 尚不存在则 `docker build --network host` 并 push
-   - 若 `hls-actions-runner:$runner_version` 尚不存在则构建并 push runner 镜像
+   - 若 `hls-actions-runner:$runner_image_tag` 尚不存在则使用 `$runner_version` 构建并 push runner 镜像
    - 将 digest 固定的 ARC controller 镜像镜像到 Harbor，并把 `deploy/arc` 快照按 CAS 推送到 deploy
    - 已存在的不可变 tag **跳过重建**
 4. job summary 输出控制镜像与 runner 镜像的 `image@digest`

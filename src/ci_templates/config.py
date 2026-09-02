@@ -117,6 +117,7 @@ class Pipeline:
     control_image_repository: str = ""
     runner_image_repository: str = ""
     runner_version: str = "2.337.0"
+    runner_image_tag: str = "2.337.0"
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "Pipeline":
@@ -196,6 +197,7 @@ class Pipeline:
         if not isinstance(status_context, str) or not status_context.strip():
             raise ConfigError("status_context must be a non-empty string")
 
+        runner_version = value.get("runner_version", "2.337.0")
         string_defaults = {
             "active_image_tag": "dev",
             "previous_image_tag": "previous",
@@ -210,7 +212,8 @@ class Pipeline:
             "buildkit_min_free_space": "50GB",
             "control_image_repository": "",
             "runner_image_repository": "",
-            "runner_version": "2.337.0",
+            "runner_version": runner_version,
+            "runner_image_tag": runner_version,
         }
         configured_strings = {field: value.get(field, default) for field, default in string_defaults.items()}
         for field, field_value in configured_strings.items():

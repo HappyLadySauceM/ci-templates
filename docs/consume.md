@@ -63,8 +63,8 @@ push dev
 
 | Runner / Secret | 用途 |
 | --- | --- |
-| `hls-standard`（最多 8） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup |
-| `hls-builder`（最多 4） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
+| `hls-standard`（当前最多 5） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup |
+| `hls-builder`（当前最多 1） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
 | `arc-github-app` | ARC 在每个 runner namespace 注册 ephemeral runner |
 | `HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM` | Harbor pull/push 与 TLS |
 | `K3S_RELEASE_KUBECONFIG` | deploy-release 的集群访问 |
@@ -97,8 +97,8 @@ BuildKit cache。需要在同一 Docker daemon 上隔离不同流水线时，可
 ## 控制镜像与 runner 镜像
 
 控制镜像发布到 `control_image_repository`，runner 镜像发布到
-`runner_image_repository:<runner_version>`；runner 镜像内包含固定版本的
-Actions runner、kubectl、Helm、Rust 工具链和 `ci-templates` CLI。首次迁移时可
+`runner_image_repository:<runner_image_tag>`；`runner_version` 固定 Actions Runner
+二进制版本，runner 镜像内还包含 kubectl、Helm、Rust 工具链和 `ci-templates` CLI。首次迁移时可
 从受信任旧 runner 或管理员工作站 bootstrap 一次，之后发布 workflow 使用
 `hls-builder` 自举。
 

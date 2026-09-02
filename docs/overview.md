@@ -11,7 +11,7 @@ ci-templates 是组织的 CI/CD 控制面；应用仓库只保留薄 workflow �
        ├─ standard: plan、质量门禁、release notes、GitOps、Argo、smoke
        │       └─ GitHub Artifacts：计划、编译产物、candidate digest、摘要
        │
-       └─ builder: BuildKit + Pod 内 Docker-in-Docker（matrix，最多 4）
+       └─ builder: BuildKit + Pod 内 Docker-in-Docker（当前单节点最多 1）
                          │
                          ▼
               Harbor candidate → GitOps digest snapshot
@@ -39,7 +39,7 @@ values 的非密钥真源在 [deploy/arc](../deploy/arc/)，由 ci-templates 发
 ## 镜像与 GitOps
 
 - 控制镜像：`control_image_repository:vVERSION`，用于提供 CLI。
-- runner 镜像：`runner_image_repository:<runner_version>`，含 Actions runner、
+- runner 镜像：`runner_image_repository:<runner_image_tag>`，含由 `runner_version` 固定的 Actions runner、
   kubectl、Helm、Rust 工具链和 CLI；Harbor 对该版本 tag 启用不可变策略。
 - 应用 candidate：`<service>:sha-<GITHUB_SHA>`；质量门禁通过后由 Harbor API
   将 manifest 挂到配置的 active tag，无需 Docker promotion。

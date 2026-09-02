@@ -102,6 +102,35 @@ class CiTemplatesTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             Pipeline.from_mapping({"project": "example"})
 
+    def test_runner_image_tag_defaults_to_runner_version(self):
+        pipeline = config()
+        self.assertEqual(pipeline.runner_image_tag, pipeline.runner_version)
+
+    def test_runner_image_tag_can_version_image_independently(self):
+        value = {
+            "project": "example",
+            "source_repo": "org/example",
+            "gitops_repo": "org/gitops",
+            "gitops_path": "Example",
+            "gitops_branch": "main",
+            "runner_version": "2.337.0",
+            "runner_image_tag": "2.337.0-r1",
+            "services": [{
+                "name": "gateway",
+                "source_path": "services/gateway",
+                "version_file": "services/gateway/VERSION",
+                "dockerfile": "services/gateway/Dockerfile",
+                "context": ".",
+                "image_repository": "org/gateway",
+                "deploy_snapshot": "deploy/gateway",
+            }],
+        }
+
+        pipeline = Pipeline.from_mapping(value)
+
+        self.assertEqual(pipeline.runner_version, "2.337.0")
+        self.assertEqual(pipeline.runner_image_tag, "2.337.0-r1")
+
     @patch("ci_templates.build.subprocess.run")
     def test_docker_progress_is_written_to_stderr(self, run):
         run.return_value = subprocess.CompletedProcess([], 0)

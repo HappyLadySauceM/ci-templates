@@ -33,7 +33,7 @@ RUN sed -i "s#http://archive.ubuntu.com/ubuntu#${UBUNTU_MIRROR}#g; s#http://secu
     && apt-get install -y --no-install-recommends \
        build-essential ca-certificates curl git jq make openssh-client \
        pkg-config python3 python3-pip python3-setuptools skopeo xz-utils \
-       docker.io docker-buildx libicu74 libssl3 libkrb5-3 zlib1g \
+       docker.io docker-buildx libicu74 libssl-dev libkrb5-3 zlib1g \
        libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 \
        libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 \
        libgtk-3-0t64 libnspr4 libnss3 libpango-1.0-0 libwayland-client0 \

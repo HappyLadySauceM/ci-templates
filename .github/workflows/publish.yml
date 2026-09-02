@@ -91,6 +91,7 @@ jobs:
           print(f"control_image={config.control_image_repository}")
           print(f"runner_image={config.runner_image_repository}")
           print(f"runner_version={config.runner_version}")
+          print(f"runner_image_tag={config.runner_image_tag}")
           PY
 
       - name: Build and push versioned control and runner images
@@ -98,10 +99,11 @@ jobs:
           CONTROL_IMAGE: ${{ steps.config.outputs.control_image }}
           RUNNER_IMAGE: ${{ steps.config.outputs.runner_image }}
           RUNNER_VERSION: ${{ steps.config.outputs.runner_version }}
+          RUNNER_IMAGE_TAG: ${{ steps.config.outputs.runner_image_tag }}
         run: |
           set -euo pipefail
-          grep -R --fixed-strings -- "hls-actions-runner:$RUNNER_VERSION" deploy/arc >/dev/null || {
-            echo "ARC values must reference the configured runner version $RUNNER_VERSION" >&2
+          grep -R --fixed-strings -- "hls-actions-runner:$RUNNER_IMAGE_TAG" deploy/arc >/dev/null || {
+            echo "ARC values must reference the configured runner image tag $RUNNER_IMAGE_TAG" >&2
             exit 1
           }
           version="$(tr -d '[:space:]' < VERSION)"
@@ -109,10 +111,11 @@ jobs:
             ''|*[!0-9.]*|.*|*.) echo "invalid VERSION: $version" >&2; exit 1 ;;
           esac
           control_tag="$CONTROL_IMAGE:v$version"
-          runner_tag="$RUNNER_IMAGE:$RUNNER_VERSION"
+          runner_tag="$RUNNER_IMAGE:$RUNNER_IMAGE_TAG"
           remote_digest() {
-            docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>/dev/null \
-              | tail -n 1 || true
+            skopeo inspect --authfile "$DOCKER_CONFIG/config.json" \
+              --cert-dir "$REGISTRY_CERT_DIR/$HARBOR_REGISTRY" \
+              "docker://$1" 2>/dev/null | jq -r '.Digest // empty' || true
           }
           control_digest="$(remote_digest "$control_tag")"
           if [[ "$control_digest" != sha256:* ]]; then
@@ -129,8 +132,12 @@ jobs:
           else
             echo "Runner image already exists remotely: $runner_tag@$runner_digest"
           fi
-          control_digest="$(docker buildx imagetools inspect "$control_tag" --format '{{.Manifest.Digest}}' | tail -n 1)"
-          runner_digest="$(docker buildx imagetools inspect "$runner_tag" --format '{{.Manifest.Digest}}' | tail -n 1)"
+          for attempt in 1 2 3 4 5; do
+            control_digest="$(remote_digest "$control_tag")"
+            runner_digest="$(remote_digest "$runner_tag")"
+            [[ "$control_digest" == sha256:* && "$runner_digest" == sha256:* ]] && break
+            sleep "$attempt"
+          done
           [[ "$control_digest" == sha256:* && "$runner_digest" == sha256:* ]]
           {
             echo "### Published CI images"

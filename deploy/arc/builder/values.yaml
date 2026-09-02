@@ -23,6 +23,9 @@ listenerTemplate:
         type: RuntimeDefault
     containers:
       - name: listener
+        envFrom:
+          - secretRef:
+              name: arc-proxy
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -47,7 +50,7 @@ template:
         effect: NoSchedule
     initContainers:
       - name: init-dind-externals
-        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0
+        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0-r1
         command: ["cp", "-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
         securityContext:
           runAsUser: 0
@@ -69,15 +72,18 @@ template:
         env:
           - name: DOCKER_GROUP_GID
             value: "123"
+        envFrom:
+          - secretRef:
+              name: arc-proxy
         securityContext:
           privileged: true
         resources:
           requests:
             cpu: 7.5
-            memory: 9Gi
+            memory: 5Gi
           limits:
             cpu: 7.5
-            memory: 9Gi
+            memory: 5Gi
         startupProbe:
           exec:
             command: ["docker", "info"]
@@ -95,7 +101,7 @@ template:
             subPath: ca.crt
             readOnly: true
       - name: runner
-        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0
+        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0-r1
         imagePullPolicy: IfNotPresent
         command: ["/home/runner/run.sh"]
         env:
@@ -103,6 +109,9 @@ template:
             value: unix:///var/run/docker.sock
           - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
             value: "120"
+        envFrom:
+          - secretRef:
+              name: arc-proxy
         resources:
           requests:
             # Keep the runner cgroup aligned with the DIND daemon so
