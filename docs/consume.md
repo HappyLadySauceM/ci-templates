@@ -8,6 +8,8 @@ Knowledge-Core-Web 的 `.github/workflows/pipeline.yml`。
 
 - `.github/workflows/pipeline.yml`：job 图、并发、environment、密钥注入和
   `hls-standard` / `hls-builder` runner 选择
+- `.github/workflows/feishu-notify.yml`：把 GitHub 活动转成飞书卡片；逻辑在
+  ci-templates 的复合 Action 里，应用仓不要复制 Python
 - `.ci/pipeline.yaml`：项目与服务配置（schema v2）
 - 各服务源码、Dockerfile、`deploy/<service>/`、根 `VERSION`
 
@@ -64,7 +66,7 @@ push dev
 
 | Runner / Secret | 用途 |
 | --- | --- |
-| `hls-standard`（当前最多 4，各 8 CPU / 8Gi） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup |
+| `hls-standard`（当前最多 4，各 8 CPU / 8Gi） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup、飞书通知 |
 | `hls-builder`（当前最多 1，DinD 12 CPU / 12Gi + runner 12 CPU / 2Gi） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
 | `arc-github-app` | ARC 在每个 runner namespace 注册 ephemeral runner |
 | `HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM` | Harbor pull/push 与 TLS |
@@ -78,6 +80,12 @@ push dev
 | `BUILD_CPU_PERCENT` | 构建并行比例，默认 75 |
 | `CI_BUILDER_NAME` | 可选的 Buildx builder 名；默认 `ci-templates`，不同名称使用独立状态 |
 | `CI_REGISTRY_CA_FILE` | 可选的 Harbor CA 文件；内容指纹变化会触发 builder 重建 |
+| `FEISHU_WEBHOOK_URL` | 组织 Actions secret：飞书自定义机器人 webhook |
+| `FEISHU_WEBHOOK_SECRET` | 组织 Actions secret：飞书自定义机器人签名密钥 |
+
+`FEISHU_WEBHOOK_*` 放在组织 Actions secrets，**不要**放进 `release`
+environment，否则 PR/Issue 通知会卡在 environment 审批。不要写入
+values、SOPS、workflow 明文或日志。
 
 标准 runner 不挂宿主机 Docker socket；builder 使用 Pod 内隔离的 Docker-in-
 Docker，并将 Harbor CA 以 Secret 挂入 daemon。每个 runner Pod 的 workspace
@@ -123,6 +131,60 @@ env:
 
 本仓库 `ci-templates-publish` 成功后会在 job summary 打出 `image@digest`。未 pin
 digest 的可变 tag 不得用于那种非 ARC 的生产调用。
+
+## 飞书通知
+
+独立 workflow `.github/workflows/feishu-notify.yml` 把仓库活动推到飞书自定义
+机器人，**不**改 `pipeline.yml` 的 job 图。复合 Action 真源是
+[`.github/actions/feishu-notify`](../.github/actions/feishu-notify/)。
+
+### 机器人与密钥
+
+1. 飞书群添加自定义机器人，安全设置只开**签名校验**（不要用 IP 白名单）。
+2. 组织 `HappyLadySauceM` → Settings → Secrets and variables → Actions 增加
+   `FEISHU_WEBHOOK_URL`、`FEISHU_WEBHOOK_SECRET`，Repository access 授给要通知
+   的仓库。
+3. 本仓目前是 public，其它仓可以直接 `uses:` 这个 Action。只有改成
+   private/internal 之后，才需要在 Settings → Actions → General 页面向下滚到
+   **Access**，选 Accessible from repositories in the HappyLadySauceM
+   organization。截图里的 Actions permissions 管的是本仓能引用哪些外部
+   Action，不是别人能不能引用本仓。
+
+Webhook POST `https://open.feishu.cn/open-apis/bot/v2/hook/<id>`。签名按飞书
+官方算法：`timestamp` 为秒，HMAC-SHA256 的密钥是 `timestamp + "\n" + secret`，
+对空消息做摘要再 Base64。ARC runner 经 `HTTP_PROXY`/`HTTPS_PROXY` 访问
+`open.feishu.cn`。限流 100 次/分钟、5 次/秒；正文 ≤ 20KB。
+
+### 事件白名单
+
+订阅这些事件，避免占满 `hls-standard`（最多 4 个槽）：
+
+- `workflow_run` / `completed`：流水线成败
+- `pull_request`：`opened` / `reopened` / `closed` / `ready_for_review` /
+  `converted_to_draft`（**不含** `synchronize`）
+- `pull_request_review` / `submitted`
+- `issues`：`opened` / `reopened` / `closed`
+- `issue_comment` / `created`
+- `release` / `published`
+- `workflow_dispatch`：手动试推
+
+不订阅 `push`。过滤：名为 `feishu-notify` 的 `workflow_run`（防递归）、
+`conclusion == skipped`、以及 `issue_comment` / `pull_request_review` 上的
+`github-actions[bot]`、`dependabot[bot]`、`renovate[bot]`。失败的 CI 卡片标题
+含 `CI failed`。
+
+### 接入顺序
+
+1. 先把本仓库（含 Action）推到 `origin/main`。
+2. 应用仓复制 [`.github/workflows/feishu-notify.yml`](../.github/workflows/feishu-notify.yml)，
+   把 `uses: HappyLadySauceM/ci-templates/.github/actions/feishu-notify@main`
+   的 `@main` **换成该 Action 所在提交的 40 位 SHA**。本仓自己的 notify
+   workflow 用 `uses: ./.github/actions/feishu-notify`，先 checkout。
+3. 本地验证 Action：`PYTHONPATH=src python3 -m unittest tests.test_feishu_notify -v`
+4. 在已接入仓上 `workflow_dispatch` 一次 `feishu-notify`，确认群里出现卡片。
+   该 workflow 失败不会把 `knowledge-core-pipeline` 打红。
+
+改 Action 之后更新各仓 pin 的 SHA。不要把 webhook 或签名密钥提交进 git。
 
 ## 本地试跑
 

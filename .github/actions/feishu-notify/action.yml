@@ -1,0 +1,22 @@
+name: Feishu Notify
+description: Convert a GitHub event into a signed Feishu custom-bot card
+
+inputs:
+  webhook:
+    description: Feishu custom bot webhook URL
+    required: true
+  secret:
+    description: Feishu custom bot signature secret
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Send Feishu card
+      # Send a signed interactive card for the current GitHub event.
+      # 把当前 GitHub 事件打成带签名的飞书卡片。
+      shell: bash
+      env:
+        FEISHU_WEBHOOK_URL: ${{ inputs.webhook }}
+        FEISHU_WEBHOOK_SECRET: ${{ inputs.secret }}
+      run: python3 "${{ github.action_path }}/notify.py"

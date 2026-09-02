@@ -1,0 +1,39 @@
+name: feishu-notify
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    types: [completed]
+  pull_request:
+    types: [opened, reopened, closed, ready_for_review, converted_to_draft]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, reopened, closed]
+  issue_comment:
+    types: [created]
+  release:
+    types: [published]
+
+# Read the completed workflow payload; do not write the repository.
+# 读取已结束的 workflow payload；不写仓库。
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  notify:
+    if: github.event_name != 'workflow_run' || github.event.workflow.name != 'feishu-notify'
+    runs-on: hls-standard
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Notify Feishu
+        # Same-repo composite Action; GITHUB_EVENT_PATH already has the payload.
+        # 同仓复合 Action；GITHUB_EVENT_PATH 已带事件正文。
+        uses: ./.github/actions/feishu-notify
+        with:
+          webhook: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          secret: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
