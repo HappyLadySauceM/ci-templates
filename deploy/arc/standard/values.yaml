@@ -9,9 +9,11 @@ controllerServiceAccount:
   namespace: arc-system
   name: gha-runner-scale-set-controller-gha-rs-controller
 minRunners: 1
-# Single-node pool: four 8 CPU / 8Gi runners. Namespace quota is 32 CPU / 32Gi.
-# 单节点池：4 个 8 CPU / 8Gi runner。namespace 配额为 32 CPU / 32Gi。
-maxRunners: 4
+# Eight runners. Limit 4 CPU / 4Gi; request 2 CPU / 1Gi so the scheduler
+# can pack them with builders. Namespace limit quota stays 32 CPU / 32Gi.
+# 8 个 runner。limit 为 4 CPU / 4Gi；request 为 2 CPU / 1Gi，方便和 builder
+# 一起调度。namespace 的 limit 配额仍是 32 CPU / 32Gi。
+maxRunners: 8
 imagePullSecrets:
   - name: arc-registry-pull
 containerMode: {}
@@ -58,11 +60,11 @@ template:
         command: ["/home/runner/run.sh"]
         resources:
           requests:
-            cpu: "8"
-            memory: 8Gi
+            cpu: "2"
+            memory: 1Gi
           limits:
-            cpu: "8"
-            memory: 8Gi
+            cpu: "4"
+            memory: 4Gi
         env:
           # Node-local caches; do not use GitHub Actions cache (uploads off-cluster).
           # 节点本地缓存；不要用 GitHub Actions cache（会上传到集群外）。

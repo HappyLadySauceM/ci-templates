@@ -49,7 +49,7 @@ push dev
    GitHub Artifacts 跨 job 传递，不依赖宿主机目录。
 2. `hls-standard` 只执行质量、GitOps、Argo 和 smoke；`hls-builder` 才允许
    Docker-in-Docker 特权构建。matrix 的 `max-parallel` 不得超过 builder
-   Scale Set 的 `maxRunners: 1`。池容量与缓存见 [ARC 实现](arc.md)。
+   Scale Set 的 `maxRunners: 8`。池容量与缓存见 [ARC 实现](arc.md)。
 3. `build --tag sha-<GITHUB_SHA> --reuse-existing` 使用不可变 candidate；
    重试时复用已存在的远端 manifest，避免覆盖 tag。
 4. `promote-snapshot` 以 GitOps 分支头为 CAS，远端前进时重新 clone 并重试；
@@ -66,8 +66,8 @@ push dev
 
 | Runner / Secret | 用途 |
 | --- | --- |
-| `hls-standard`（当前最多 4，各 8 CPU / 8Gi） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup、飞书通知 |
-| `hls-builder`（当前最多 1，DinD 12 CPU / 12Gi + runner 12 CPU / 2Gi） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
+| `hls-standard`（最多 8，request 2 CPU / 1Gi，limit 4 CPU / 4Gi） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup、飞书通知 |
+| `hls-builder`（最多 8，DinD 4 CPU / 4Gi + runner 4 CPU / 1Gi；request 更低） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
 | `arc-github-app` | ARC 在每个 runner namespace 注册 ephemeral runner |
 | `HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM` | Harbor pull/push 与 TLS |
 | `K3S_RELEASE_KUBECONFIG` | deploy-release 的集群访问 |
@@ -134,8 +134,10 @@ digest 的可变 tag 不得用于那种非 ARC 的生产调用。
 
 ## 飞书通知
 
-独立 workflow `.github/workflows/feishu-notify.yml` 把仓库活动推到飞书自定义
-机器人，**不**改 `pipeline.yml` 的 job 图。复合 Action 真源是
+CI 成败在 `pipeline.yml` / `publish.yml` / Skill-Constructor `ci.yml` **末尾
+job** 发飞书（`if: always()`），卡片带 run 标题、耗时、产物和 run 链接。
+独立 workflow `.github/workflows/feishu-notify.yml` 只覆盖 PR、Issue、Review
+和 Release，**不再**订阅 `workflow_run`。复合 Action 真源是
 [`.github/actions/feishu-notify`](../.github/actions/feishu-notify/)。
 
 ### 机器人与密钥
@@ -157,9 +159,8 @@ Webhook POST `https://open.feishu.cn/open-apis/bot/v2/hook/<id>`。签名按飞�
 
 ### 事件白名单
 
-订阅这些事件，避免占满 `hls-standard`（最多 4 个槽）：
+订阅这些事件，避免占满 `hls-standard`（最多 8 个槽）：
 
-- `workflow_run` / `completed`：流水线成败
 - `pull_request`：`opened` / `reopened` / `closed` / `ready_for_review` /
   `converted_to_draft`（**不含** `synchronize`）
 - `pull_request_review` / `submitted`
@@ -168,18 +169,18 @@ Webhook POST `https://open.feishu.cn/open-apis/bot/v2/hook/<id>`。签名按飞�
 - `release` / `published`
 - `workflow_dispatch`：手动试推
 
-不订阅 `push`。过滤：名为 `feishu-notify` 的 `workflow_run`（防递归）、
-`conclusion == skipped`、以及 `issue_comment` / `pull_request_review` 上的
-`github-actions[bot]`、`dependabot[bot]`、`renovate[bot]`。失败的 CI 卡片标题
-含 `CI failed`。
+不订阅 `push` 和 `workflow_run`。过滤：`issue_comment` / `pull_request_review`
+上的 `github-actions[bot]`、`dependabot[bot]`、`renovate[bot]`。失败的 CI
+卡片标题含 `CI failed`。Release 卡带说明正文和 git compare。
 
 ### 接入顺序
 
 1. 先把本仓库（含 Action）推到 `origin/main`。
 2. 应用仓复制 [`.github/workflows/feishu-notify.yml`](../.github/workflows/feishu-notify.yml)，
-   把 `uses:` 钉成该 Action 所在提交的 40 位 SHA（当前为
-   `2d06b38ff477b97b93bbd0ee7a7e51d5724d3cfe`）。本仓自己的 notify
-   workflow 用 `uses: ./.github/actions/feishu-notify`，先 checkout。
+   把 `uses:` 钉成该 Action 所在提交的 40 位 SHA。CI 卡片改动进 `origin/main` 之后，把
+   Knowledge-Core / Web / Skill-Constructor 的 pin 从
+   `2d06b38ff477b97b93bbd0ee7a7e51d5724d3cfe` 换成新 SHA。本仓自己的 notify
+   workflow 和 `publish.yml` 末尾 job 用 `uses: ./.github/actions/feishu-notify`，先 checkout。
 3. 本地验证 Action：`PYTHONPATH=src python3 -m unittest tests.test_feishu_notify -v`
 4. 在已接入仓上 `workflow_dispatch` 一次 `feishu-notify`，确认群里出现卡片。
    该 workflow 失败不会把 `knowledge-core-pipeline` 打红。

@@ -8,6 +8,14 @@ inputs:
   secret:
     description: Feishu custom bot signature secret
     required: true
+  card:
+    description: Set to ci for pipeline/publish/CI end-of-run summary cards
+    required: false
+    default: ""
+  conclusion:
+    description: Override run conclusion for same-workflow notify jobs
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -19,4 +27,7 @@ runs:
       env:
         FEISHU_WEBHOOK_URL: ${{ inputs.webhook }}
         FEISHU_WEBHOOK_SECRET: ${{ inputs.secret }}
+        FEISHU_CARD_KIND: ${{ inputs.card }}
+        FEISHU_CONCLUSION: ${{ inputs.conclusion }}
+        GITHUB_TOKEN: ${{ github.token }}
       run: python3 "${{ github.action_path }}/notify.py"

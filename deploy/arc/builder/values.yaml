@@ -9,9 +9,12 @@ controllerServiceAccount:
   namespace: arc-system
   name: gha-runner-scale-set-controller-gha-rs-controller
 minRunners: 0
-# Emergency single-node canary cap. Restore to 4 after dedicated CI workers
-# are labelled and tainted as documented in deploy/docs/ci-runners.md.
-maxRunners: 1
+# Eight builders share the existing 64 CPU / 40Gi limit quota. Per-pod
+# limits are DinD 4/4Gi plus runner 4/1Gi; requests stay lower so they
+# can schedule beside standard runners.
+# 8 个 builder 共用现有 64 CPU / 40Gi 的 limit 配额。每 Pod limit 为
+# DinD 4/4Gi 加 runner 4/1Gi；request 更低，才能和 standard 一起调度。
+maxRunners: 8
 imagePullSecrets:
   - name: arc-registry-pull
 containerMode: {}
@@ -56,10 +59,11 @@ template:
           runAsUser: 0
           runAsGroup: 0
         resources:
+          # Requests only: limits would add 8×500m/256Mi on top of 64 CPU /
+          # 40Gi and block the eighth builder. The init copy is short-lived.
+          # 只写 request：limit 会在 64 CPU / 40Gi 之外再加 8×500m/256Mi，
+          # 挡住第 8 个 builder。init 拷贝过程很短。
           requests:
-            cpu: 500m
-            memory: 256Mi
-          limits:
             cpu: 500m
             memory: 256Mi
         volumeMounts:
@@ -80,13 +84,15 @@ template:
         resources:
           requests:
             # Quoted CPU so Helm/YAML keep a string. Align with the runner
-            # cgroup so build_jobs() matches BuildKit.
+            # cgroup so build_jobs() matches BuildKit. Request is half of
+            # limit so eight builders can schedule beside standard.
             # CPU 必须加引号。与 runner cgroup 对齐，让 build_jobs() 和 BuildKit 一致。
-            cpu: "12"
-            memory: 12Gi
+            # request 是 limit 的一半，8 个 builder 才能和 standard 一起调度。
+            cpu: "2"
+            memory: 1Gi
           limits:
-            cpu: "12"
-            memory: 12Gi
+            cpu: "4"
+            memory: 4Gi
         startupProbe:
           exec:
             command: ["docker", "info"]
@@ -134,11 +140,11 @@ template:
             # Keep the runner cgroup aligned with the DIND daemon so
             # build_jobs() sees the CPUs that BuildKit can actually use.
             # runner cgroup 与 DinD 对齐，build_jobs() 才能看到 BuildKit 实际可用的核。
-            cpu: "12"
-            memory: 2Gi
+            cpu: "2"
+            memory: 512Mi
           limits:
-            cpu: "12"
-            memory: 2Gi
+            cpu: "4"
+            memory: 1Gi
         volumeMounts:
           - name: work
             mountPath: /home/runner/_work

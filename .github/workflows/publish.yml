@@ -187,3 +187,25 @@ jobs:
           set -euo pipefail
           test -n "${GITOPS_TOKEN:-}" || { echo 'GITOPS_TOKEN is required for ARC snapshot promotion' >&2; exit 1; }
           ci-templates promote-snapshot --config "$CI_PROJECT_CONFIG" --source-sha "$GITHUB_SHA"
+
+  notify:
+    if: always()
+    needs: [publish]
+    runs-on: hls-standard
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Notify Feishu
+        # Same-repo composite Action; GITHUB_EVENT_PATH already has the payload.
+        # 同仓复合 Action；GITHUB_EVENT_PATH 已带事件正文。
+        uses: ./.github/actions/feishu-notify
+        with:
+          webhook: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          secret: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+          card: ci
+          conclusion: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}

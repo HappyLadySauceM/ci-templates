@@ -2,12 +2,6 @@ name: feishu-notify
 
 on:
   workflow_dispatch:
-  workflow_run:
-    # Only completed CI/publish runs; listing names is required by GitHub.
-    # 只听已结束的 CI/发布；GitHub 要求必须写出 workflow 名称。
-    workflows:
-      - ci-templates-publish
-    types: [completed]
   pull_request:
     types: [opened, reopened, closed, ready_for_review, converted_to_draft]
   pull_request_review:
@@ -19,15 +13,14 @@ on:
   release:
     types: [published]
 
-# Read the completed workflow payload; do not write the repository.
-# 读取已结束的 workflow payload；不写仓库。
+# Read the event payload; do not write the repository.
+# 读取事件正文；不写仓库。
 permissions:
   contents: read
   actions: read
 
 jobs:
   notify:
-    if: github.event_name != 'workflow_run' || github.event.workflow.name != 'feishu-notify'
     runs-on: hls-standard
     timeout-minutes: 5
     steps:

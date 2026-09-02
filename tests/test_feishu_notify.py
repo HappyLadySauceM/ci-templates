@@ -195,6 +195,119 @@ class FeishuCardTest(unittest.TestCase):
         self.assertIn("v1.2.3", json.dumps(card))
         self.assertEqual(card["card"]["header"]["template"], "green")
 
+    def test_push_ci_card_includes_title_duration_artifacts_and_run_link(self):
+        payload = {
+            "head_commit": {
+                "message": "fix(ci): name the Feishu workflow_run listeners GitHub requires\n\nbody",
+            },
+            "repository": {
+                "full_name": "HappyLadySauceM/Knowledge-Core-Web",
+                "html_url": "https://github.com/HappyLadySauceM/Knowledge-Core-Web",
+            },
+            "sender": {"login": "alice"},
+        }
+        run = {
+            "id": 33648574717,
+            "run_number": 45,
+            "display_title": "fix(ci): name the Feishu workflow_run listeners GitHub requires #45",
+            "html_url": "https://github.com/HappyLadySauceM/Knowledge-Core-Web/actions/runs/33648574717",
+            "created_at": "2026-09-02T12:00:00Z",
+            "run_started_at": "2026-09-02T12:00:05Z",
+            "conclusion": "success",
+            "status": "completed",
+            "head_branch": "dev",
+            "event": "push",
+            "name": "knowledge-core-web-pipeline",
+        }
+        artifacts = {
+            "artifacts": [
+                {"name": "knowledge-core-web-verification-1", "expired": False},
+                {"name": "knowledge-core-web-candidate-web-1", "expired": False},
+            ]
+        }
+        card = notify.build_card(
+            "push",
+            payload,
+            run=run,
+            artifacts=artifacts,
+            now="2026-09-02T12:42:14Z",
+        )
+        dumped = json.dumps(card, ensure_ascii=False)
+        self.assertIn("fix(ci): name the Feishu workflow_run listeners GitHub requires #45", dumped)
+        self.assertIn("42m 9s", dumped)
+        self.assertIn("2026-09-02T12:00:00Z", dumped)
+        self.assertIn("knowledge-core-web-verification-1", dumped)
+        self.assertIn("knowledge-core-web-candidate-web-1", dumped)
+        self.assertIn(
+            "https://github.com/HappyLadySauceM/Knowledge-Core-Web/actions/runs/33648574717",
+            dumped,
+        )
+        self.assertEqual(card["card"]["header"]["template"], "green")
+
+    def test_failed_push_ci_card_uses_ci_failed_header(self):
+        payload = {
+            "head_commit": {"message": "break the build"},
+            "repository": {"full_name": "org/repo"},
+            "sender": {"login": "alice"},
+        }
+        run = {
+            "run_number": 7,
+            "display_title": "break the build #7",
+            "html_url": "https://github.com/org/repo/actions/runs/9",
+            "created_at": "2026-09-02T12:00:00Z",
+            "run_started_at": "2026-09-02T12:00:00Z",
+            "conclusion": "failure",
+            "name": "knowledge-core-pipeline",
+        }
+        card = notify.build_card("push", payload, run=run, now="2026-09-02T12:01:00Z")
+        self.assertIn("CI failed", card["card"]["header"]["title"]["content"])
+        self.assertEqual(card["card"]["header"]["template"], "red")
+
+    def test_format_duration_matches_github_summary(self):
+        self.assertEqual(
+            notify.format_duration("2026-09-02T12:00:05Z", "2026-09-02T12:42:14Z"),
+            "42m 9s",
+        )
+        self.assertEqual(
+            notify.format_duration("2026-09-02T12:00:00Z", "2026-09-02T12:00:15Z"),
+            "15s",
+        )
+        self.assertEqual(
+            notify.format_duration("2026-09-02T10:00:00Z", "2026-09-02T12:03:04Z"),
+            "2h 3m 4s",
+        )
+
+    def test_release_card_includes_body_and_compare_button(self):
+        payload = {
+            "action": "published",
+            "release": {
+                "tag_name": "v1.2.3",
+                "name": "Web 1.2.3",
+                "body": "Ship the Feishu card and bump runner capacity.\n\n- notify\n- runners",
+                "html_url": "https://github.com/org/repo/releases/tag/v1.2.3",
+            },
+            "repository": {
+                "full_name": "org/repo",
+                "html_url": "https://github.com/org/repo",
+            },
+            "sender": {"login": "alice"},
+        }
+        card = notify.build_card("release", payload, previous_tag="v1.2.2")
+        dumped = json.dumps(card, ensure_ascii=False)
+        self.assertIn("Ship the Feishu card and bump runner capacity.", dumped)
+        self.assertIn("https://github.com/org/repo/compare/v1.2.2...v1.2.3", dumped)
+        self.assertIn("https://github.com/org/repo/releases/tag/v1.2.3", dumped)
+
+    def test_previous_release_tag_skips_the_current_tag(self):
+        releases = [
+            {"tag_name": "v1.2.3", "draft": False},
+            {"tag_name": "v1.2.2", "draft": False},
+            {"tag_name": "v1.2.1", "draft": True},
+            {"tag_name": "v1.2.0", "draft": False},
+        ]
+        self.assertEqual(notify.previous_release_tag(releases, "v1.2.3"), "v1.2.2")
+        self.assertIsNone(notify.previous_release_tag([{"tag_name": "v1.0.0", "draft": False}], "v1.0.0"))
+
 
 class FeishuPostTest(unittest.TestCase):
     def test_post_includes_timestamp_and_sign(self):

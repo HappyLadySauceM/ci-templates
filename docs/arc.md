@@ -79,7 +79,7 @@ Chart 从 Harbor OCI `harbor.harbor.svc.cluster.local/helm` 读；values 文件�
 deploy 快照里的路径，例如 `$values/ci-templates/deploy/arc/standard/values.yaml`。
 同步顺序：foundation → controller → 两个 Scale Set。
 
-Helm/YAML 里的 CPU 必须写成带引号的字符串（`"8"`、`"12"`），否则可能被解析成
+Helm/YAML 里的 CPU 必须写成带引号的字符串（`"2"`、`"4"`），否则可能被解析成
 数字，chart 会拒收。
 
 ### 当前容量
@@ -89,12 +89,19 @@ Helm/YAML 里的 CPU 必须写成带引号的字符串（`"8"`、`"12"`），否
 
 | 池 | Namespace | min / max | 每 Pod 资源 | namespace 配额 |
 | --- | --- | --- | --- | --- |
-| `hls-standard` | `arc-runners-standard` | 1 / 4 | 8 CPU / 8Gi | 32 CPU / 32Gi（pods 上限 8） |
-| `hls-builder` | `arc-runners-builder` | 0 / 1 | DinD `"12"` / 12Gi + runner `"12"` / 2Gi，合计 24 CPU / 14Gi | 64 CPU / 40Gi（pods 上限 4） |
+| `hls-standard` | `arc-runners-standard` | 1 / 8 | request 2 CPU / 1Gi，limit 4 CPU / 4Gi | 32 CPU / 32Gi（pods 上限 12） |
+| `hls-builder` | `arc-runners-builder` | 0 / 8 | DinD request `"2"` / 1Gi、limit `"4"` / 4Gi；runner 同样 CPU，内存 512Mi / 1Gi。8 个 limit 合计 64 CPU / 40Gi | 64 CPU / 40Gi（pods 上限 10） |
 | controller | `arc-system` | 2 replica | 见 controller values |  |
 
-不要把 ResourceQuota 的 `pods` 当成 `maxRunners`。standard 配额允许 8 个 Pod
-是为了滚动和 listener，Scale Set 实际最多 4 个 runner。
+不要把 ResourceQuota 的 `pods` 当成 `maxRunners`。standard 配额允许 12 个 Pod、
+builder 允许 10 个，是为了滚动重叠；Scale Set 实际最多 8 个 runner。
+
+`request` 只给 kube-scheduler 和 ResourceQuota 做加法，不是 JVM `-Xms` 那种预留。
+`limit` 是 cgroup 天花板（`cpu.max` / `memory.max`）。8 个 standard 加 8 个
+builder 的 request 约 48 CPU / 20Gi，可以同时调度到约 80 CPU / 64Gi 的节点；
+limit 合计超过节点容量，真打满会 CPU 节流或 kubelet 驱逐（QoS Burstable）。
+builder 的 CPU/内存 `limits.*` 配额不加大，靠把每 Pod limit 降到 8 CPU / 5Gi
+才塞进 8 个。init 容器只写 request、不写 limit，避免 8×500m/256Mi 顶破配额。
 
 两个池都调度到 `workload.happyladysauce.local/ci=true`，并容忍对应污点。
 `hls-standard` 容器非 root（uid 1001）、drop ALL、不是 privileged 容器。
@@ -102,7 +109,7 @@ Helm/YAML 里的 CPU 必须写成带引号的字符串（`"8"`、`"12"`），否
 
 ### Pod Security 与节点缓存
 
-四个 standard runner 要共用同一份节点缓存。`hostPath` 在 Pod Security
+四个以上 standard runner 要共用同一份节点缓存。`hostPath` 在 Pod Security
 `restricted` 和 `baseline:latest` 下都被禁止；local PV 又是 ReadWriteOnce，
 没法给四个 Pod 同时挂。因此 `arc-runners-standard` 的 enforce 是
 **privileged**，只为允许 hostPath。builder namespace 同样 privileged，因为
@@ -123,9 +130,11 @@ Harbor registry `buildcache` 是 builder 上 BuildKit 的另一套缓存，不�
 hostPath 里。
 
 `ci-templates` 的 `build_jobs()` 读的是 **runner 容器** 的 cgroup
-（`cpu.max` / 亲和性），默认取可见 CPU 的 75%。所以 DinD 与 runner 的 CPU
-request/limit 必须写成一样大，否则 BuildKit `max-parallelism` 会按较小的
-runner 配额算。`BUILD_JOBS` 紧急覆盖仍受 runner 可见核数限制。
+（`cpu.max` / 亲和性），默认取可见 CPU 的 75%。DinD 与 runner 的 CPU
+request/limit **彼此必须相同**，否则 BuildKit `max-parallelism` 会按较小的
+runner cgroup 算。当前两边 limit 都是 `"4"`，所以 `BUILD_JOBS`≈3。
+`BUILD_JOBS` 紧急覆盖仍受 runner 可见核数限制。request 可以低于 limit（给
+调度超卖），`cpu.max` 仍是 limit。
 
 ### 两套 GitHub App
 
@@ -176,7 +185,7 @@ runner 配额算。`BUILD_JOBS` 紧急覆盖仍受 runner 可见核数限制。
 plan                    hls-standard
   ├─ go/rust/web 门禁   hls-standard   → GitHub Artifacts（含隐藏 .ci-artifacts）
   ├─ prewarm            hls-builder    needs: [plan]，与门禁并行
-  ├─ package-candidates hls-builder    max-parallel: 1
+  ├─ package-candidates hls-builder    max-parallel: 8
   └─ release-notes      hls-standard
 deploy-release          hls-standard   promote-snapshot → argo-wait → smoke
 cleanup-candidates      hls-standard
@@ -184,8 +193,8 @@ cleanup-candidates      hls-standard
 
 要点：
 
-- `package-candidates` 的 `max-parallel` 必须是 **1**，与 `hls-builder`
-  `maxRunners: 1` 对齐。
+- `package-candidates` 的 `max-parallel` 必须是 **8**，与 `hls-builder`
+  `maxRunners: 8` 对齐。
 - 计划、编译产物、candidate digest、release 摘要走 GitHub Artifacts，不写
   宿主机路径。
 - 无 Docker 的活放 `hls-standard`；只有需要 dockerd / buildx 的步骤放
@@ -214,7 +223,7 @@ ARC 是**组织级**的。新仓库不要自己装 controller，也不要新建 
    `environment: release`：`GH_APP_ID`、`GH_APP_PRIVATE_KEY`、
    `HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM`、`K3S_RELEASE_KUBECONFIG`，
    若要自动 Release 摘要再加 `DEEPSEEK_API_KEY`。
-5. 遵守：DinD 只在 `hls-builder`；builder matrix `max-parallel` ≤ 1；不要
+5. 遵守：DinD 只在 `hls-builder`；builder matrix `max-parallel` ≤ 8；不要
    `actions/cache`；不要写 `/opt/actions-runner`、kubelet 数据目录或自己发明
    的宿主机 `_cache`。节点缓存由 ARC 挂到 `/cache`。
 6. 对照已接入仓库：

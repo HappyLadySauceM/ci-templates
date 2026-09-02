@@ -11,7 +11,7 @@ ci-templates 是组织的 CI/CD 控制面；应用仓库只保留薄 workflow �
        ├─ standard: plan、质量门禁、release notes、GitOps、Argo、smoke
        │       └─ GitHub Artifacts：计划、编译产物、candidate digest、摘要
        │
-       └─ builder: BuildKit + Pod 内 Docker-in-Docker（当前单节点最多 1）
+       └─ builder: BuildKit + Pod 内 Docker-in-Docker（最多 8，与 standard 超卖共节点）
                          │
                          ▼
               Harbor candidate → GitOps digest snapshot
@@ -26,8 +26,9 @@ ci-templates 是组织的 CI/CD 控制面；应用仓库只保留薄 workflow �
 ## ARC 运行池
 
 组织 self-hosted runner 由 ARC Scale Set 提供，叙事真源见 [ARC 实现](arc.md)。
-当前 `maxRunners`：`hls-standard` 4（每 Pod 8 CPU / 8Gi），`hls-builder` 1
-（DinD `"12"` / 12Gi + runner `"12"` / 2Gi）。两个池调度到
+当前 `maxRunners`：`hls-standard` 8（request 2 CPU / 1Gi，limit 4 CPU / 4Gi），
+`hls-builder` 8（DinD `"4"` / 4Gi + runner `"4"` / 1Gi，CPU/内存 limit 配额
+仍 64/40Gi）。两个池调度到
 `workload.happyladysauce.local/ci=true`；standard 不挂宿主机 socket，builder
 的 privileged 只存在于隔离 namespace。
 
