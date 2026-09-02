@@ -7,9 +7,9 @@ spec:
   hard:
     pods: "8"
     requests.cpu: "8"
-    requests.memory: 16Gi
+    requests.memory: 32Gi
     limits.cpu: "8"
-    limits.memory: 16Gi
+    limits.memory: 32Gi
 ---
 apiVersion: v1
 kind: ResourceQuota
