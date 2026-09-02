@@ -14,9 +14,15 @@ metadata:
   name: arc-runners-standard
   labels:
     app.kubernetes.io/part-of: actions-runner-controller
-    pod-security.kubernetes.io/enforce: restricted
-    pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/warn: restricted
+    # Baseline (not restricted): hostPath node-local caches. Restricted
+    # forbids hostPath; a local PV is ReadWriteOnce and cannot be shared
+    # by four concurrent runners. Pods still run as 1001 with ALL dropped.
+    # 使用 baseline 而非 restricted：节点本地 hostPath 缓存。restricted
+    # 禁止 hostPath；local PV 为 RWO，无法给 4 个并发 runner 共用。
+    # Pod 仍以 1001 运行并 drop ALL。
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
 ---
 apiVersion: v1
 kind: Namespace

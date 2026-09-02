@@ -27,5 +27,7 @@ intentionally prerequisites rather than generated here.
 Provision dedicated tainted CI workers before raising either cap. The current
 single-node pool reserves 32 CPU / 32 GiB for four standard runners and 6 GiB
 for one builder pod; node hostPath `/var/lib/hls-ci-cache` holds language
-caches. The ARC controller itself is highly available with two
+caches. `arc-runners-standard` is Pod Security **baseline** (not restricted)
+so four runners can share that hostPath; pods still run as uid 1001 with ALL
+capabilities dropped. The ARC controller itself is highly available with two
 replicas.
