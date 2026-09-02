@@ -46,7 +46,7 @@ push dev
    GitHub Artifacts 跨 job 传递，不依赖宿主机目录。
 2. `hls-standard` 只执行质量、GitOps、Argo 和 smoke；`hls-builder` 才允许
    Docker-in-Docker 特权构建。matrix 的 `max-parallel` 不得超过 builder
-   Scale Set 的 `maxRunners: 4`。
+   Scale Set 的 `maxRunners: 1`。
 3. `build --tag sha-<GITHUB_SHA> --reuse-existing` 使用不可变 candidate；
    重试时复用已存在的远端 manifest，避免覆盖 tag。
 4. `promote-snapshot` 以 GitOps 分支头为 CAS，远端前进时重新 clone 并重试；
