@@ -79,10 +79,10 @@ template:
           privileged: true
         resources:
           requests:
-            cpu: 7.5
+            cpu: "7.5"
             memory: 5Gi
           limits:
-            cpu: 7.5
+            cpu: "7.5"
             memory: 5Gi
         startupProbe:
           exec:
@@ -116,10 +116,10 @@ template:
           requests:
             # Keep the runner cgroup aligned with the DIND daemon so
             # build_jobs() sees the CPUs that BuildKit can actually use.
-            cpu: 7.5
+            cpu: "7.5"
             memory: 1Gi
           limits:
-            cpu: 7.5
+            cpu: "7.5"
             memory: 1Gi
         volumeMounts:
           - name: work

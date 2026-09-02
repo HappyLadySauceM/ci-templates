@@ -19,9 +19,10 @@ are `github_app_id`, `github_app_installation_id`, and
 `github_app_private_key`; the App must have organization self-hosted-runner
 read/write access and no repository contents access. The same namespaces need
 the deploy-managed `arc-registry-pull` image-pull Secret and `arc-registry-ca`
-CA Secret. Both runner namespaces also require the environment-managed
-`arc-proxy` Secret containing upper- and lower-case HTTP(S) proxy and no-proxy
-variables. These are intentionally prerequisites rather than generated here.
+CA Secret. Both runner namespaces and `arc-system` also require the
+environment-managed `arc-proxy` Secret containing upper- and lower-case HTTP(S)
+proxy and no-proxy variables, because listeners run in `arc-system`. These are
+intentionally prerequisites rather than generated here.
 
 Provision dedicated tainted CI workers before raising either cap. The current
 single-node canary reserves at most 30 GiB for five standard runners and 6 GiB
