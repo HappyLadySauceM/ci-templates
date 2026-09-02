@@ -14,15 +14,16 @@ metadata:
   name: arc-runners-standard
   labels:
     app.kubernetes.io/part-of: actions-runner-controller
-    # Baseline (not restricted): hostPath node-local caches. Restricted
-    # forbids hostPath; a local PV is ReadWriteOnce and cannot be shared
-    # by four concurrent runners. Pods still run as 1001 with ALL dropped.
-    # 使用 baseline 而非 restricted：节点本地 hostPath 缓存。restricted
-    # 禁止 hostPath；local PV 为 RWO，无法给 4 个并发 runner 共用。
-    # Pod 仍以 1001 运行并 drop ALL。
-    pod-security.kubernetes.io/enforce: baseline
-    pod-security.kubernetes.io/audit: baseline
-    pod-security.kubernetes.io/warn: baseline
+    # Privileged namespace is required for hostPath caches. Both baseline
+    # and restricted forbid hostPath; a local PV is ReadWriteOnce and cannot
+    # be shared by four concurrent runners. Runner pods stay non-root with
+    # ALL dropped and are not privileged containers.
+    # namespace 必须 privileged 才能挂 hostPath 缓存。baseline 与 restricted
+    # 都禁止 hostPath；local PV 为 RWO，无法给 4 个并发 runner 共用。
+    # Runner 容器仍非 root、drop ALL，且不是 privileged 容器。
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
 ---
 apiVersion: v1
 kind: Namespace
