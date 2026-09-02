@@ -7,10 +7,10 @@ GitHub App Secret, private-registry pull secret, node labels and cluster-local
 policy; no credential belongs here.
 
 The controller is installed in `arc-system`. Runner pods are split between
-`arc-runners-standard` (direct runner pods, target max eight) and
+`arc-runners-standard` (direct runner pods, target max four at 8 GiB each) and
 `arc-runners-builder` (privileged Docker-in-Docker, target max four). During
-the single-control-plane canary the checked-in emergency caps are two and one;
-restore the target limits only after dedicated CI workers are available. The
+the single-control-plane canary the checked-in builder cap remains one;
+restore its target limit only after dedicated CI workers are available. The
 two pools must be scheduled only on nodes labelled
 `workload.happyladysauce.local/ci=true`.
 
@@ -26,4 +26,5 @@ Provision at least two tainted CI worker nodes (minimum 32 vCPU, 64 GiB RAM,
 250 GiB local SSD each), label them with the key above, and keep ordinary
 workloads from that taint. The quotas reserve capacity for eight standard and
 four builder pods; the ARC controller itself is highly available with two
-replicas.
+replicas. The standard namespace's 32 GiB memory quota matches four 8 GiB
+runner pods exactly.

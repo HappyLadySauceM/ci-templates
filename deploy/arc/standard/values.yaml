@@ -9,9 +9,9 @@ controllerServiceAccount:
   namespace: arc-system
   name: gha-runner-scale-set-controller-gha-rs-controller
 minRunners: 1
-# Emergency single-node canary cap. Restore to 8 after dedicated CI workers
-# are labelled and tainted as documented in deploy/docs/ci-runners.md.
-maxRunners: 2
+# Single-node standard pool cap: four runners at 8 GiB each. Add dedicated CI
+# workers before increasing this limit further.
+maxRunners: 4
 imagePullSecrets:
   - name: arc-registry-pull
 containerMode: {}
@@ -54,10 +54,10 @@ template:
         resources:
           requests:
             cpu: "1"
-            memory: 4Gi
+            memory: 8Gi
           limits:
             cpu: "1"
-            memory: 4Gi
+            memory: 8Gi
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: false
