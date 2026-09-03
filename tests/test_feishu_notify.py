@@ -116,8 +116,11 @@ class FeishuCardTest(unittest.TestCase):
         payload["workflow_run"]["display_title"] = "break the build #7"
         card = notify.build_card("workflow_run", payload)
         title = card["card"]["header"]["title"]["content"]
-        self.assertTrue(title.startswith("CICD："))
-        self.assertIn("break the build #7", title)
+        self.assertEqual(title, "CICD：HappyLadySauceM/Knowledge-Core")
+        self.assertIn(
+            "**break the build #7**",
+            card["card"]["elements"][0]["text"]["content"],
+        )
         self.assertNotIn("CI failed", title)
         self.assertEqual(card["card"]["header"]["template"], "red")
         self.assertEqual(card["msg_type"], "interactive")
@@ -236,7 +239,10 @@ class FeishuCardTest(unittest.TestCase):
             now="2026-09-02T12:42:14Z",
         )
         dumped = json.dumps(card, ensure_ascii=False)
-        self.assertTrue(card["card"]["header"]["title"]["content"].startswith("CICD："))
+        self.assertEqual(
+            card["card"]["header"]["title"]["content"],
+            "CICD：HappyLadySauceM/Knowledge-Core-Web",
+        )
         self.assertIn("fix(ci): name the Feishu workflow_run listeners GitHub requires #45", dumped)
         self.assertIn("42m 9s", dumped)
         self.assertIn("2026-09-02T12:00:00Z", dumped)
@@ -248,6 +254,9 @@ class FeishuCardTest(unittest.TestCase):
             dumped,
         )
         self.assertEqual(card["card"]["header"]["template"], "green")
+        body = card["card"]["elements"][0]["text"]["content"]
+        self.assertIn("\n- **Workflow:** knowledge-core-web-pipeline", body)
+        self.assertIn("\n- **Conclusion:** success", body)
 
     def test_failed_push_ci_card_uses_ci_failed_header(self):
         payload = {
@@ -265,8 +274,11 @@ class FeishuCardTest(unittest.TestCase):
             "name": "knowledge-core-pipeline",
         }
         card = notify.build_card("push", payload, run=run, now="2026-09-02T12:01:00Z")
-        self.assertTrue(card["card"]["header"]["title"]["content"].startswith("CICD："))
-        self.assertIn("break the build #7", card["card"]["header"]["title"]["content"])
+        self.assertEqual(card["card"]["header"]["title"]["content"], "CICD：org/repo")
+        self.assertIn(
+            "**break the build #7**",
+            card["card"]["elements"][0]["text"]["content"],
+        )
         self.assertEqual(card["card"]["header"]["template"], "red")
 
     def test_format_duration_matches_github_summary(self):

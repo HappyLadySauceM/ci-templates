@@ -425,20 +425,19 @@ def _ci_card(
     created = str(run.get("created_at") or started)
     ended = now or datetime.now().astimezone().isoformat()
     duration = format_duration(started, ended) if started else ""
-    header = ("CICD：%s" % display)[:100]
-    lines = []
+    header = ("CICD：%s" % repo)[:100]
+    lines = ["**%s**" % display]
     if greeting:
         lines.append(greeting)
     lines.extend(
         [
-            "**Title:** %s" % display,
-            "**Workflow:** %s" % str(run.get("name") or ""),
-            "**Conclusion:** %s" % conclusion,
-            "**Triggered:** %s" % created,
-            "**Total duration:** %s" % duration,
-            "**Branch:** %s" % str(run.get("head_branch") or ""),
-            "**Actor:** %s" % actor,
-            "**Event:** %s" % str(run.get("event") or ""),
+            "- **Workflow:** %s" % str(run.get("name") or ""),
+            "- **Conclusion:** %s" % conclusion,
+            "- **Triggered:** %s" % created,
+            "- **Total duration:** %s" % duration,
+            "- **Branch:** %s" % str(run.get("head_branch") or ""),
+            "- **Actor:** %s" % actor,
+            "- **Event:** %s" % str(run.get("event") or ""),
         ]
     )
     return _card(header, _workflow_color(conclusion), lines, [("Open run", url)])

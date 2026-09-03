@@ -1,0 +1,72 @@
+name: Feishu Pipeline Task
+description: Synchronize one GitHub Actions pipeline with a reusable Feishu task-board card
+
+inputs:
+  operation:
+    description: provision creates the board/task; sync consumes a workflow_run event
+    required: false
+    default: sync
+  app-id:
+    description: Feishu custom application ID
+    required: true
+  app-secret:
+    description: Feishu custom application secret
+    required: true
+  chat-id:
+    description: Open Chat ID shared with the task list
+    required: true
+  github-custom-attr-id:
+    description: Feishu contact custom-attribute ID containing a GitHub login or profile URL
+    required: true
+  tasklist-name:
+    description: Shared Feishu task-list name
+    required: false
+    default: CICD 流水线
+  repository:
+    description: GitHub owner/repository; defaults to the current repository
+    required: false
+    default: ""
+  workflow-name:
+    description: Monitored GitHub workflow name
+    required: true
+  github-token:
+    description: GitHub token used to resolve commits and contributors
+    required: false
+    default: ""
+  deepseek-api-key:
+    description: DeepSeek key for terminal-state notes; deterministic text is used when unavailable
+    required: false
+    default: ""
+
+outputs:
+  tasklist-guid:
+    description: Feishu task-list GUID
+    value: ${{ steps.track.outputs.tasklist-guid }}
+  task-guid:
+    description: Feishu pipeline task GUID
+    value: ${{ steps.track.outputs.task-guid }}
+  state:
+    description: Applied board state
+    value: ${{ steps.track.outputs.state }}
+  matched-users:
+    description: Number of matched Feishu followers
+    value: ${{ steps.track.outputs.matched-users }}
+
+runs:
+  using: composite
+  steps:
+    - name: Synchronize Feishu pipeline task
+      id: track
+      shell: bash
+      env:
+        TRACKER_OPERATION: ${{ inputs.operation }}
+        FEISHU_APP_ID: ${{ inputs.app-id }}
+        FEISHU_APP_SECRET: ${{ inputs.app-secret }}
+        FEISHU_CHAT_ID: ${{ inputs.chat-id }}
+        FEISHU_GITHUB_CUSTOM_ATTR_ID: ${{ inputs.github-custom-attr-id }}
+        FEISHU_TASKLIST_NAME: ${{ inputs.tasklist-name }}
+        TRACKER_REPOSITORY: ${{ inputs.repository || github.repository }}
+        TRACKER_WORKFLOW_NAME: ${{ inputs.workflow-name }}
+        GITHUB_TOKEN: ${{ inputs.github-token || github.token }}
+        DEEPSEEK_API_KEY: ${{ inputs.deepseek-api-key }}
+      run: python3 "${{ github.action_path }}/task_tracker.py"

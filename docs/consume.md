@@ -139,9 +139,11 @@ digest 的可变 tag 不得用于那种非 ARC 的生产调用。
 
 ## 飞书通知
 
-CI 成败在 `pipeline.yml` / `publish.yml` / Skill-Constructor `ci.yml` **末尾
-job** 发飞书（`if: always()`）。CI 卡标题为 `CICD：` 加 commit 标题，带耗时
-和 run 链接，**不列 Artifacts**；有 `DEEPSEEK_API_KEY` 时加一句中文问候。
+迁移任务看板前，CI 成败在 `pipeline.yml` / `publish.yml` / Skill-Constructor
+`ci.yml` **末尾 job** 发飞书（`if: always()`）。CI 卡 header 为
+`CICD：<owner/repository>`，commit 标题显示在正文首行；Workflow、Conclusion、
+Branch 等信息使用飞书 Markdown 原生列点。卡片带耗时和 run 链接，**不列
+Artifacts**；有 `DEEPSEEK_API_KEY` 时加一句中文问候。
 DeepSeek 请求最多重试 3 次；密钥缺失、超时、空响应或失败时记录 warning，
 并使用固定中文回退文案，不能阻断 CI 卡片发送。
 发版卡只在同一条 pipeline 真正创建了 GitHub Release（`release_tag` 非空）时
@@ -149,6 +151,43 @@ DeepSeek 请求最多重试 3 次；密钥缺失、超时、空响应或失败�
 独立 workflow `.github/workflows/feishu-notify.yml` 只覆盖 PR、Issue、Review
 和评论，**不再**订阅 `workflow_run` 或 `release`。复合 Action 真源是
 [`.github/actions/feishu-notify`](../.github/actions/feishu-notify/)。
+
+### CICD 任务看板
+
+任务看板接入后，流水线状态不再发群卡片。一个仓库的主流水线对应一个长期
+复用的飞书任务；任务保持未完成，用统一清单中的 `未触发`、`执行中`、
+`执行完毕`、`执行出错` 四个自定义分组表达状态。共享 Action 真源是
+[`.github/actions/feishu-pipeline-task`](../.github/actions/feishu-pipeline-task/)。
+
+监听 workflow 使用 `workflow_run` 的 `requested`、`in_progress` 和 `completed`
+事件并运行在 `ubuntu-latest`，这样 ARC 整体不可用时仍可更新错误状态。先手动
+执行一次 `operation: provision`，幂等创建清单、分组以及处于 `未触发` 的任务；
+后续事件使用 `operation: sync`。重跑没有 `requested` 事件，`in_progress` 会把
+任务移回执行中。同步器以 run ID、attempt 和阶段拒绝乱序旧事件。
+
+飞书自建应用需启用机器人能力并加入目标群，至少授予：
+
+- `task:task:write`、`task:tasklist:write`
+- `im:chat.members:read`
+- `contact:contact.base:readonly`、`contact:user.employee:readonly`
+
+管理员还需为保存 GitHub login 的通讯录自定义字段启用“允许开放平台 API
+调用”。字段类型只能是 TEXT 或 HREF，值支持 `login`、`@login`、
+`https://github.com/login`。同步器只读取目标群成员并按 login 精确匹配，将本次
+提交贡献者设为任务关注人；无匹配时回退触发者。人工添加的关注人不会删除。
+
+组织 Actions 配置如下，不要把值提交进 git：
+
+| 名称 | 类型 | 用途 |
+| --- | --- | --- |
+| `FEISHU_APP_SECRET` | Secret | 飞书自建应用密钥 |
+| `FEISHU_APP_ID` | Variable | 飞书自建应用 ID |
+| `FEISHU_CHAT_ID` | Variable | 看板共享群 Open Chat ID |
+| `FEISHU_GITHUB_ATTR_ID` | Variable | GitHub 身份自定义字段 ID |
+| `DEEPSEEK_API_KEY` | Secret | 终态任务提示语；失败时有固定回退文案 |
+
+清单名默认是 `CICD 流水线`，目标群以 editor 身份加入清单。任务 `extra` 保存
+同步游标和自动关注人集合；任务更新总是最后写游标，确保中途 API 失败后可重试。
 
 ### 机器人与密钥
 
