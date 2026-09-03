@@ -27,7 +27,8 @@ GitHub 主流水线（ARC）
 
 终态一直保留，下一次运行开始时再移到“执行中”。同步器在任务 `extra` 中保存
 `run_id`、`run_attempt` 和阶段，延迟到达的旧事件不会覆盖新状态。所有成员、
-分组操作成功后才写入同步游标，因此 API 中途失败可以安全重跑。
+分组操作成功后才写入同步游标，因此 API 中途失败可以安全重跑。监听 workflow
+按仓库串行执行，避免多个事件同时读取旧游标后互相覆盖。
 
 ## 飞书应用准备
 
@@ -85,6 +86,10 @@ on:
 permissions:
   actions: read
   contents: read
+
+concurrency:
+  group: ${{ github.repository }}-feishu-pipeline-task
+  cancel-in-progress: false
 
 jobs:
   track:
