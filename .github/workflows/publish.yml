@@ -13,6 +13,7 @@ on:
       - src/**
       - tests/**
       - deploy/arc/**
+      - .github/actions/**
       - .github/workflows/publish.yml
   workflow_dispatch:
 
@@ -193,6 +194,7 @@ jobs:
     needs: [publish]
     runs-on: hls-standard
     timeout-minutes: 5
+    environment: release
     permissions:
       actions: read
       contents: read
@@ -208,4 +210,5 @@ jobs:
           webhook: ${{ secrets.FEISHU_WEBHOOK_URL }}
           secret: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
           card: ci
+          deepseek-api-key: ${{ secrets.DEEPSEEK_API_KEY }}
           conclusion: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}

@@ -9,6 +9,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -37,6 +38,7 @@ HEADER_TEMPLATES = {
     "grey": "grey",
     "blue": "blue",
 }
+_VERSION_HEADING = re.compile(r"^#{1,6}\s*v?\d+\.\d+(?:\.\d+)?\b.*$", re.IGNORECASE)
 
 
 class NotifyError(RuntimeError):
@@ -166,6 +168,45 @@ def _truncate(text: str, limit: int = 400) -> str:
     return text[: limit - 1] + "…"
 
 
+def strip_release_version_heading(text: str) -> str:
+    """Drop leading Markdown version headings such as # v0.1.1.
+
+    去掉正文开头的版本标题（例如 # v0.1.1），GitHub Release 名已经有 tag。
+    """
+
+    lines = text.splitlines()
+    while lines:
+        first = lines[0].strip()
+        if not first:
+            lines.pop(0)
+            continue
+        if _VERSION_HEADING.match(first):
+            lines.pop(0)
+            continue
+        break
+    return "\n".join(lines).strip()
+
+
+def format_release_notes(body: str, limit: int = 1500) -> str:
+    """Keep newlines and turn Markdown headings into lark_md bold.
+
+    保留换行，并把 Markdown 标题转成飞书 lark_md 粗体。
+    """
+
+    text = strip_release_version_heading(body)
+    formatted: list[str] = []
+    for line in text.splitlines():
+        heading = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if heading:
+            formatted.append("**%s**" % heading.group(2).strip())
+        else:
+            formatted.append(line)
+    text = "\n".join(formatted).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 def _parse_time(value: str) -> datetime:
     text = value.strip()
     if text.endswith("Z"):
@@ -252,22 +293,52 @@ def _repo_html(payload: dict[str, Any], repo: str) -> str:
     return "https://github.com/%s" % repo
 
 
-def _artifact_names(artifacts: Any) -> list[str]:
-    items: list[Any]
-    if isinstance(artifacts, dict):
-        items = list(artifacts.get("artifacts") or [])
-    elif isinstance(artifacts, list):
-        items = artifacts
-    else:
-        items = []
-    names: list[str] = []
-    for item in items:
-        if not isinstance(item, dict) or item.get("expired"):
-            continue
-        name = item.get("name")
-        if isinstance(name, str) and name:
-            names.append(name)
-    return names
+def summarize_ci_greeting(title: str, duration: str, branch: str, conclusion: str) -> str:
+    """Ask DeepSeek for a short Chinese greeting; empty on missing key or errors.
+
+    向 DeepSeek 要一句中文问候；没有密钥或失败时返回空字符串。
+    """
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        return ""
+    endpoint = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/chat/completions")
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    prompt = {
+        "instruction": (
+            "用简体中文写 1 到 3 句给程序员看的飞书问候。"
+            "成功时轻松祝贺并提醒劳逸结合；失败时稳住并建议先点 Open run。"
+            "只根据给定字段，不要编造未提供的事实，不要提密钥或内部路径。"
+        ),
+        "title": title,
+        "duration": duration,
+        "branch": branch,
+        "conclusion": conclusion,
+    }
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
+        "temperature": 0.7,
+        "max_tokens": 300,
+    }
+    request = Request(
+        endpoint,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer %s" % api_key,
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            raw = response.read()
+        parsed = json.loads(raw.decode("utf-8") or "{}")
+        text = str(parsed["choices"][0]["message"]["content"] or "").strip()
+    except Exception:
+        log.exception("DeepSeek CI greeting failed")
+        return ""
+    return text[:500]
 
 
 def _ci_display_title(payload: dict[str, Any], run: dict[str, Any]) -> str:
@@ -285,8 +356,8 @@ def _ci_display_title(payload: dict[str, Any], run: dict[str, Any]) -> str:
 def _ci_card(
     payload: dict[str, Any],
     run: dict[str, Any],
-    artifacts: Any,
     now: str | None,
+    greeting: str = "",
 ) -> dict[str, Any]:
     repo = _repo(payload)
     actor = _actor(payload)
@@ -301,23 +372,22 @@ def _ci_card(
     created = str(run.get("created_at") or started)
     ended = now or datetime.now().astimezone().isoformat()
     duration = format_duration(started, ended) if started else ""
-    names = _artifact_names(artifacts)
-    if names:
-        artifact_lines = ["**Artifacts:**"] + ["- %s" % name for name in names]
-    else:
-        artifact_lines = ["**Artifacts:** none"]
-    header = "CI failed · %s" % repo if conclusion == "failure" else display
-    lines = [
-        "**Title:** %s" % display,
-        "**Workflow:** %s" % str(run.get("name") or ""),
-        "**Conclusion:** %s" % conclusion,
-        "**Triggered:** %s" % created,
-        "**Total duration:** %s" % duration,
-        "**Branch:** %s" % str(run.get("head_branch") or ""),
-        "**Actor:** %s" % actor,
-        "**Event:** %s" % str(run.get("event") or ""),
-        *artifact_lines,
-    ]
+    header = ("CICD：%s" % display)[:100]
+    lines = []
+    if greeting:
+        lines.append(greeting)
+    lines.extend(
+        [
+            "**Title:** %s" % display,
+            "**Workflow:** %s" % str(run.get("name") or ""),
+            "**Conclusion:** %s" % conclusion,
+            "**Triggered:** %s" % created,
+            "**Total duration:** %s" % duration,
+            "**Branch:** %s" % str(run.get("head_branch") or ""),
+            "**Actor:** %s" % actor,
+            "**Event:** %s" % str(run.get("event") or ""),
+        ]
+    )
     return _card(header, _workflow_color(conclusion), lines, [("Open run", url)])
 
 
@@ -330,22 +400,26 @@ def build_card(
     previous_tag: str | None = None,
     now: str | None = None,
     kind: str = "",
+    greeting: str = "",
 ) -> dict[str, Any]:
     """Build an inline Feishu interactive card for a GitHub event.
 
     为 GitHub 事件构造内联飞书交互卡片。
     """
 
+    del artifacts
     repo = _repo(payload)
     actor = _actor(payload)
-    use_ci = kind == "ci" or event_name in CI_EVENT_NAMES
+    if kind == "release":
+        event_name = "release"
+    use_ci = kind == "ci" or (kind != "release" and event_name in CI_EVENT_NAMES)
     if use_ci:
         resolved = dict(run or {})
         if event_name == "workflow_run" and not resolved:
             wf_run = payload.get("workflow_run") or {}
             if isinstance(wf_run, dict):
                 resolved = dict(wf_run)
-        return _ci_card(payload, resolved, artifacts, now)
+        return _ci_card(payload, resolved, now, greeting=greeting)
 
     if event_name == "pull_request":
         pr = payload.get("pull_request") or {}
@@ -435,15 +509,15 @@ def build_card(
             "**Tag:** %s" % tag,
             "**Actor:** %s" % actor,
         ]
-        if body:
-            lines.append("**Notes:**")
-            lines.append(_truncate(body, 1500))
+        notes = format_release_notes(body)
+        if notes:
+            lines.append("**Notes:**\n%s" % notes)
         buttons = [("Open release", url)]
         if previous_tag:
             buttons.append(("Compare", "%s/compare/%s...%s" % (repo_url, previous_tag, tag)))
         elif tag:
             buttons.append(("Tag commit", "%s/commits/%s" % (repo_url, tag)))
-        return _card("Release %s · %s" % (tag, repo), "green", lines, buttons)
+        return _card("Release %s · %s" % (tag, repo), "blue", lines, buttons)
 
     url = str((payload.get("repository") or {}).get("html_url") or "")
     return _card(
@@ -522,11 +596,23 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     kind = os.environ.get("FEISHU_CARD_KIND", "").strip()
+    release_tag = os.environ.get("FEISHU_RELEASE_TAG", "").strip()
     run: dict[str, Any] | None = None
-    artifacts: Any = None
     previous_tag: str | None = None
+    greeting = ""
     repo = os.environ.get("GITHUB_REPOSITORY") or _repo(payload)
     run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
+    if kind == "release" or release_tag:
+        kind = "release"
+        if event_name != "release" and release_tag:
+            try:
+                loaded = github_get("/repos/%s/releases/tags/%s" % (repo, release_tag))
+                if isinstance(loaded, dict):
+                    payload = dict(payload)
+                    payload["release"] = loaded
+            except NotifyError:
+                log.exception("Failed to load GitHub release %s", release_tag)
+        event_name = "release"
     if kind == "ci" or event_name in CI_EVENT_NAMES:
         if event_name == "workflow_run":
             wf_run = payload.get("workflow_run") or {}
@@ -544,13 +630,18 @@ def main(argv: list[str] | None = None) -> int:
             run = {}
         if conclusion:
             run["conclusion"] = conclusion
-        if run_id:
-            try:
-                artifacts = github_get("/repos/%s/actions/runs/%s/artifacts" % (repo, run_id))
-            except NotifyError:
-                log.exception("Failed to load GitHub Actions artifacts")
+        display = _ci_display_title(payload, run)
+        started = str(run.get("run_started_at") or run.get("created_at") or "")
+        ended = datetime.now().astimezone().isoformat()
+        duration = format_duration(started, ended) if started else ""
+        greeting = summarize_ci_greeting(
+            display,
+            duration,
+            str(run.get("head_branch") or ""),
+            str(run.get("conclusion") or conclusion or "unknown"),
+        )
     if event_name == "release":
-        tag = str((payload.get("release") or {}).get("tag_name") or "")
+        tag = release_tag or str((payload.get("release") or {}).get("tag_name") or "")
         try:
             loaded = github_get("/repos/%s/releases?per_page=20" % repo)
             releases = loaded if isinstance(loaded, list) else []
@@ -562,9 +653,9 @@ def main(argv: list[str] | None = None) -> int:
         event_name,
         payload,
         run=run,
-        artifacts=artifacts,
         previous_tag=previous_tag,
         kind=kind,
+        greeting=greeting,
     )
     try:
         post_card(webhook, secret, card)

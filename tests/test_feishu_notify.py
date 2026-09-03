@@ -110,12 +110,15 @@ class FeishuSkipTest(unittest.TestCase):
 
 
 class FeishuCardTest(unittest.TestCase):
-    def test_failed_workflow_header_includes_ci_failed_keyword(self):
+    def test_failed_workflow_header_uses_cicd_prefix(self):
         payload = workflow_run_payload()
         payload["workflow_run"]["conclusion"] = "failure"
+        payload["workflow_run"]["display_title"] = "break the build #7"
         card = notify.build_card("workflow_run", payload)
         title = card["card"]["header"]["title"]["content"]
-        self.assertIn("CI failed", title)
+        self.assertTrue(title.startswith("CICD："))
+        self.assertIn("break the build #7", title)
+        self.assertNotIn("CI failed", title)
         self.assertEqual(card["card"]["header"]["template"], "red")
         self.assertEqual(card["msg_type"], "interactive")
 
@@ -193,9 +196,9 @@ class FeishuCardTest(unittest.TestCase):
         }
         card = notify.build_card("release", payload)
         self.assertIn("v1.2.3", json.dumps(card))
-        self.assertEqual(card["card"]["header"]["template"], "green")
+        self.assertEqual(card["card"]["header"]["template"], "blue")
 
-    def test_push_ci_card_includes_title_duration_artifacts_and_run_link(self):
+    def test_push_ci_card_includes_title_duration_and_run_link_without_artifacts(self):
         payload = {
             "head_commit": {
                 "message": "fix(ci): name the Feishu workflow_run listeners GitHub requires\n\nbody",
@@ -233,11 +236,13 @@ class FeishuCardTest(unittest.TestCase):
             now="2026-09-02T12:42:14Z",
         )
         dumped = json.dumps(card, ensure_ascii=False)
+        self.assertTrue(card["card"]["header"]["title"]["content"].startswith("CICD："))
         self.assertIn("fix(ci): name the Feishu workflow_run listeners GitHub requires #45", dumped)
         self.assertIn("42m 9s", dumped)
         self.assertIn("2026-09-02T12:00:00Z", dumped)
-        self.assertIn("knowledge-core-web-verification-1", dumped)
-        self.assertIn("knowledge-core-web-candidate-web-1", dumped)
+        self.assertNotIn("knowledge-core-web-verification-1", dumped)
+        self.assertNotIn("knowledge-core-web-candidate-web-1", dumped)
+        self.assertNotIn("**Artifacts:**", dumped)
         self.assertIn(
             "https://github.com/HappyLadySauceM/Knowledge-Core-Web/actions/runs/33648574717",
             dumped,
@@ -260,7 +265,8 @@ class FeishuCardTest(unittest.TestCase):
             "name": "knowledge-core-pipeline",
         }
         card = notify.build_card("push", payload, run=run, now="2026-09-02T12:01:00Z")
-        self.assertIn("CI failed", card["card"]["header"]["title"]["content"])
+        self.assertTrue(card["card"]["header"]["title"]["content"].startswith("CICD："))
+        self.assertIn("break the build #7", card["card"]["header"]["title"]["content"])
         self.assertEqual(card["card"]["header"]["template"], "red")
 
     def test_format_duration_matches_github_summary(self):
@@ -294,9 +300,51 @@ class FeishuCardTest(unittest.TestCase):
         }
         card = notify.build_card("release", payload, previous_tag="v1.2.2")
         dumped = json.dumps(card, ensure_ascii=False)
+        notes = card["card"]["elements"][0]["text"]["content"]
         self.assertIn("Ship the Feishu card and bump runner capacity.", dumped)
+        self.assertIn("\n- notify\n- runners", notes)
+        self.assertNotIn("v0.1.1", notes)
+        self.assertEqual(card["card"]["header"]["template"], "blue")
         self.assertIn("https://github.com/org/repo/compare/v1.2.2...v1.2.3", dumped)
         self.assertIn("https://github.com/org/repo/releases/tag/v1.2.3", dumped)
+
+    def test_release_notes_drop_duplicate_version_heading(self):
+        payload = {
+            "action": "published",
+            "release": {
+                "tag_name": "v0.1.26",
+                "name": "v0.1.26",
+                "body": "# v0.1.1 - 共享变更：\n\n- 调整 CI\n\n## Affected services\n\n- gateway",
+                "html_url": "https://github.com/org/repo/releases/tag/v0.1.26",
+            },
+            "repository": {"full_name": "org/repo", "html_url": "https://github.com/org/repo"},
+            "sender": {"login": "alice"},
+        }
+        notes = notify.build_card("release", payload)["card"]["elements"][0]["text"]["content"]
+        self.assertNotIn("v0.1.1", notes)
+        self.assertIn("- 调整 CI", notes)
+        self.assertIn("\n", notes)
+
+    def test_ci_card_includes_deepseek_greeting(self):
+        payload = workflow_run_payload()
+        card = notify.build_card(
+            "workflow_run",
+            payload,
+            greeting="今天流水线很顺利，记得歇口气。",
+        )
+        self.assertIn("今天流水线很顺利，记得歇口气。", card["card"]["elements"][0]["text"]["content"])
+
+    def test_summarize_ci_greeting_returns_empty_without_key(self):
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}, clear=False):
+            self.assertEqual(notify.summarize_ci_greeting("ok", "1s", "dev", "success"), "")
+
+    def test_summarize_ci_greeting_returns_empty_on_http_error(self):
+        def boom(*args, **kwargs):
+            raise HTTPError("https://api.deepseek.com", 500, "boom", hdrs=None, fp=BytesIO(b"err"))
+
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}, clear=False):
+            with patch.object(notify, "urlopen", boom):
+                self.assertEqual(notify.summarize_ci_greeting("ok", "1s", "dev", "success"), "")
 
     def test_previous_release_tag_skips_the_current_tag(self):
         releases = [

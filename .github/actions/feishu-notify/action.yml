@@ -16,6 +16,14 @@ inputs:
     description: Override run conclusion for same-workflow notify jobs
     required: false
     default: ""
+  deepseek-api-key:
+    description: Optional DeepSeek key for CI card greetings
+    required: false
+    default: ""
+  release-tag:
+    description: GitHub release tag for pipeline-issued release cards
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -29,5 +37,7 @@ runs:
         FEISHU_WEBHOOK_SECRET: ${{ inputs.secret }}
         FEISHU_CARD_KIND: ${{ inputs.card }}
         FEISHU_CONCLUSION: ${{ inputs.conclusion }}
+        FEISHU_RELEASE_TAG: ${{ inputs.release-tag }}
+        DEEPSEEK_API_KEY: ${{ inputs.deepseek-api-key }}
         GITHUB_TOKEN: ${{ github.token }}
       run: python3 "${{ github.action_path }}/notify.py"

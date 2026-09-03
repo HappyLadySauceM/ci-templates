@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -13,6 +14,26 @@ class ReleaseError(RuntimeError):
 
 _RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 _DEEPSEEK_ATTEMPTS = 3
+_VERSION_HEADING = re.compile(r"^#{1,6}\s*v?\d+\.\d+(?:\.\d+)?\b.*$", re.IGNORECASE)
+
+
+def strip_release_version_heading(text: str) -> str:
+    """Drop leading Markdown version headings such as # v0.1.1.
+
+    去掉正文开头的版本标题（例如 # v0.1.1），GitHub Release 名已经有 tag。
+    """
+
+    lines = text.splitlines()
+    while lines:
+        first = lines[0].strip()
+        if not first:
+            lines.pop(0)
+            continue
+        if _VERSION_HEADING.match(first):
+            lines.pop(0)
+            continue
+        break
+    return "\n".join(lines).strip()
 
 
 def _deepseek_request(endpoint: str, api_key: str, body: dict, *, validate=None) -> dict:
@@ -48,7 +69,8 @@ def render_aggregate_release(
     service_entries: list[tuple[str, str]],
     deployed_services: list[str],
 ) -> str:
-    sections = [f"# {aggregate_tag}", ""]
+    del aggregate_tag
+    sections: list[str] = []
     shared = shared_summary.strip()
     if shared:
         sections.extend(["## Shared changes", "", shared, ""])
@@ -129,20 +151,21 @@ def summarize_release_with_deepseek(
     language: str = "en",
 ) -> str:
     """Create one bounded project summary for all shared and service changes."""
+    del aggregate_tag
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
     endpoint = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/chat/completions")
     if not api_key:
         raise ReleaseError("DEEPSEEK_API_KEY is required before deployment")
     prompt = {
-        "aggregate_tag": aggregate_tag,
         "changes": context,
         "deployed_services": deployed_services,
         "instruction": (
             f"Write a concise functional release summary in {language}. Use only the supplied "
             "redacted paths and diffs. Cover shared changes and service-specific changes in "
             "separate Markdown bullet groups, omit empty groups, and never mention commit hashes, "
-            "branches, workflows, authors, credentials, or release metadata. Never invent details. "
-            "Return Markdown bullets only, without a title."
+            "branches, workflows, authors, credentials, version numbers, tags, VERSION files, "
+            "or release metadata. Never invent details. Return Markdown bullets only, without "
+            "a title. Do not start with a heading."
         ),
     }
     body = {
@@ -165,7 +188,10 @@ def summarize_release_with_deepseek(
         raise ReleaseError("DeepSeek returned an invalid response") from exc
     if not summary:
         raise ReleaseError("DeepSeek returned an empty response")
-    sections = [f"# {aggregate_tag}", "", summary[:12000], ""]
+    summary = strip_release_version_heading(summary[:12000])
+    if not summary:
+        raise ReleaseError("DeepSeek returned an empty response")
+    sections = [summary, ""]
     if deployed_services:
         sections.extend(["## Affected services", ""])
         sections.extend(f"- {service}" for service in deployed_services)

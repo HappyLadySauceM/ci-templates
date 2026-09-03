@@ -40,6 +40,7 @@ push dev
         → argo-wait → smoke → Harbor tag promotion + release
         → 失败且冒烟未通过则 rollback-snapshot
   → standard cleanup-candidates
+  → standard notify: 始终发 CICD 卡；仅当 deploy-release 产出 release_tag 再发蓝色发版卡
 ```
 
 要点：
@@ -73,7 +74,7 @@ push dev
 | `K3S_RELEASE_KUBECONFIG` | deploy-release 的集群访问 |
 | `GH_APP_ID`、`GH_APP_PRIVATE_KEY` | 访问源仓库、deploy、status 与 Release |
 | `GITOPS_TOKEN` | ci-templates runner snapshot 推送 |
-| `DEEPSEEK_API_KEY` | release-notes 的单次摘要 |
+| `DEEPSEEK_API_KEY` | release-notes 的单次摘要，以及 pipeline/publish 末尾 CI 飞书卡的可选问候 |
 | `CI_PROJECT_CONFIG` | `.ci/pipeline.yaml` 配置路径 |
 | `CI_GITOPS_IMAGE_OVERRIDES_JSON` | promote-snapshot / argo-wait 的 digest |
 | `CI_RELEASE_CHANGES_FILE` | 未传 `--changes-file` 时的 release 上下文 |
@@ -135,9 +136,13 @@ digest 的可变 tag 不得用于那种非 ARC 的生产调用。
 ## 飞书通知
 
 CI 成败在 `pipeline.yml` / `publish.yml` / Skill-Constructor `ci.yml` **末尾
-job** 发飞书（`if: always()`），卡片带 run 标题、耗时、产物和 run 链接。
+job** 发飞书（`if: always()`）。CI 卡标题为 `CICD：` 加 commit 标题，带耗时
+和 run 链接，**不列 Artifacts**；有 `DEEPSEEK_API_KEY` 时加一句中文问候，
+没有或失败则只发结构化字段。
+发版卡只在同一条 pipeline 真正创建了 GitHub Release（`release_tag` 非空）时
+发送，蓝色标题，Notes 保留换行且不含正文版本号。
 独立 workflow `.github/workflows/feishu-notify.yml` 只覆盖 PR、Issue、Review
-和 Release，**不再**订阅 `workflow_run`。复合 Action 真源是
+和评论，**不再**订阅 `workflow_run` 或 `release`。复合 Action 真源是
 [`.github/actions/feishu-notify`](../.github/actions/feishu-notify/)。
 
 ### 机器人与密钥
@@ -166,12 +171,11 @@ Webhook POST `https://open.feishu.cn/open-apis/bot/v2/hook/<id>`。签名按飞�
 - `pull_request_review` / `submitted`
 - `issues`：`opened` / `reopened` / `closed`
 - `issue_comment` / `created`
-- `release` / `published`
 - `workflow_dispatch`：手动试推
 
-不订阅 `push` 和 `workflow_run`。过滤：`issue_comment` / `pull_request_review`
-上的 `github-actions[bot]`、`dependabot[bot]`、`renovate[bot]`。失败的 CI
-卡片标题含 `CI failed`。Release 卡带说明正文和 git compare。
+不订阅 `push`、`workflow_run` 和 `release`。过滤：`issue_comment` / `pull_request_review`
+上的 `github-actions[bot]`、`dependabot[bot]`、`renovate[bot]`。CI 卡标题以
+`CICD：` 开头；失败用红色。发版卡由 pipeline notify 在有 tag 时发送。
 
 ### 接入顺序
 

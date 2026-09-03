@@ -4,7 +4,12 @@ import unittest
 from urllib.error import HTTPError
 from unittest.mock import patch
 
-from ci_templates.release import ReleaseError, summarize_release_with_deepseek, summarize_with_deepseek
+from ci_templates.release import (
+    ReleaseError,
+    strip_release_version_heading,
+    summarize_release_with_deepseek,
+    summarize_with_deepseek,
+)
 
 
 class _Response:
@@ -52,8 +57,14 @@ class DeepSeekReleaseTest(unittest.TestCase):
         )
 
         self.assertIn("- remote summary", body)
+        self.assertNotIn("# v1.2.3", body)
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once_with(1)
+
+    def test_strip_release_version_heading_drops_model_tag(self):
+        text = strip_release_version_heading("# v0.1.1 - 共享变更：\n\n- 调整 CI\n")
+        self.assertNotIn("v0.1.1", text)
+        self.assertIn("- 调整 CI", text)
 
     @patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}, clear=False)
     @patch("ci_templates.release.time.sleep")
@@ -68,6 +79,19 @@ class DeepSeekReleaseTest(unittest.TestCase):
 
         urlopen.assert_called_once()
         sleep.assert_not_called()
+
+    @patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}, clear=False)
+    @patch("ci_templates.release.urlopen")
+    def test_aggregate_summary_strips_model_version_heading(self, urlopen):
+        urlopen.return_value = _Response(
+            {"choices": [{"message": {"content": "# v0.1.1 - 共享变更：\n- 调整 CI"}}]}
+        )
+        body = summarize_release_with_deepseek(
+            "deepseek-test", "v0.1.26", {"shared": {}, "services": {}}, ["gateway"], "zh-CN"
+        )
+        self.assertNotIn("v0.1.1", body)
+        self.assertNotIn("# v0.1.26", body)
+        self.assertIn("- 调整 CI", body)
 
 
 if __name__ == "__main__":

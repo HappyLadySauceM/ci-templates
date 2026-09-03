@@ -288,8 +288,6 @@ class CiTemplatesTest(unittest.TestCase):
         )
         self.assertEqual(
             body,
-            "# v0.1.6\n"
-            "\n"
             "## Shared changes\n"
             "\n"
             "- Cap BUILD_JOBS at three quarters of host CPUs.\n"
@@ -300,6 +298,7 @@ class CiTemplatesTest(unittest.TestCase):
             "- identity\n"
             "- knowledge\n",
         )
+        self.assertFalse(body.startswith("# v"))
         body = render_aggregate_release(
             "v0.1.7",
             "",
@@ -600,7 +599,7 @@ class CiTemplatesTest(unittest.TestCase):
             "org/example",
             "v1.2.1",
             "a" * 40,
-            "# v1.2.1\n\n## Service-specific changes\n\n### gateway\n\nsummary\n\n## Affected services\n\n- gateway\n",
+            "## Service-specific changes\n\n### gateway\n\nsummary\n\n## Affected services\n\n- gateway\n",
             name="v1.2.1",
         )
         summarize.assert_called_once()
@@ -940,7 +939,8 @@ class CiTemplatesTest(unittest.TestCase):
             body = summarize_release_with_deepseek(
                 "deepseek-v4-flash", "v1.1.7", {"shared": {}, "services": {}}, ["gateway"], "zh-CN"
             )
-        self.assertIn("# v1.1.7", body)
+        self.assertNotIn("# v1.1.7", body)
+        self.assertFalse(body.startswith("# v"))
         self.assertIn("- gateway", body)
         urlopen_mock.assert_called_once()
 

@@ -15,11 +15,12 @@
 
 由 `summarize` 或 `release` 内部渲染，章节为：
 
-- `# vX.Y.Z`
 - `## Shared changes` — 共享 / CI / 构建；只改 Dockerfile 也在这里
 - `## Service-specific changes` — 仅当 `services/<svc>` 或 `deploy/<svc>` 业务路径有变更
 - `## Affected services` — 本次部署的服务列表
 - 若没有服务、只有根级 deploy 变更：`## Deployment scope` + `- Shared deployment configuration`
+
+版本号只出现在 GitHub Release 的 name/tag，不要写进正文标题（避免再出现 `# v0.1.1` 这类误导）。
 
 ### 上下文与模型
 

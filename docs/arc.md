@@ -167,7 +167,8 @@ runner cgroup 算。当前两边 limit 都是 `"4"`，所以 `BUILD_JOBS`≈3。
 
 1. 改本仓库 `deploy/arc` 的 values / foundation。
 2. 推 `main`，让 `ci-templates-publish` 跑 `promote-snapshot`。
-3. 同步对应 Argo Application（automated 可能未开，需要一次 sync）。
+3. GitOps 默认 `automated.enabled: true` 且 selfHeal；ApplicationSet 会覆盖
+   pause。确认四个 `platform-arc-*` Application 的自动同步仍开着即可。
 
 不要 `kubectl delete` 正在跑 job 的 runner Pod。AutoscalingRunnerSet 模板更新
 后，**下一个** ephemeral Pod 才用新资源；当前 job 保持旧 spec 直到结束。
@@ -224,7 +225,7 @@ ARC 是**组织级**的。新仓库不要自己装 controller，也不要新建 
 4. 配置 GitHub `release` environment，并在读取这些密钥的 job 上声明
    `environment: release`：`GH_APP_ID`、`GH_APP_PRIVATE_KEY`、
    `HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM`、`K3S_RELEASE_KUBECONFIG`，
-   若要自动 Release 摘要再加 `DEEPSEEK_API_KEY`。
+   若要自动 Release 摘要和 CI 飞书问候再加 `DEEPSEEK_API_KEY`。
 5. 遵守：DinD 只在 `hls-builder`；builder matrix `max-parallel` ≤ 8；不要
    `actions/cache`；不要写 `/opt/actions-runner`、kubelet 数据目录或自己发明
    的宿主机 `_cache`。节点缓存由 ARC 挂到 `/cache`。

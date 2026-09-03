@@ -10,8 +10,6 @@ on:
     types: [opened, reopened, closed]
   issue_comment:
     types: [created]
-  release:
-    types: [published]
 
 # Read the event payload; do not write the repository.
 # 读取事件正文；不写仓库。
