@@ -21,5 +21,9 @@ spec:
     pods: "10"
     requests.cpu: "64"
     requests.memory: 40Gi
-    limits.cpu: "64"
-    limits.memory: 40Gi
+    # 8 × (DinD 4 + runner 4 + init 500m) = 68 CPU;
+    # 8 × (4Gi + 1Gi + 256Mi) = 42Gi. Requests stay 64/40Gi.
+    # 8 × (DinD 4 + runner 4 + init 500m) = 68 CPU；
+    # 8 × (4Gi + 1Gi + 256Mi) = 42Gi。request 配额仍是 64/40Gi。
+    limits.cpu: "68"
+    limits.memory: 42Gi

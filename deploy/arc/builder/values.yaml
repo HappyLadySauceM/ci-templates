@@ -9,11 +9,13 @@ controllerServiceAccount:
   namespace: arc-system
   name: gha-runner-scale-set-controller-gha-rs-controller
 minRunners: 0
-# Eight builders share the existing 64 CPU / 40Gi limit quota. Per-pod
-# limits are DinD 4/4Gi plus runner 4/1Gi; requests stay lower so they
-# can schedule beside standard runners.
-# 8 个 builder 共用现有 64 CPU / 40Gi 的 limit 配额。每 Pod limit 为
-# DinD 4/4Gi 加 runner 4/1Gi；request 更低，才能和 standard 一起调度。
+# Eight builders share the namespace limit quota. Per-pod limits are
+# DinD 4/4Gi plus runner 4/1Gi plus init 500m/256Mi (ResourceQuota
+# with limits.* requires every container, including init, to set
+# limits). Requests stay lower so they can schedule beside standard.
+# 8 个 builder 共用 namespace limit 配额。每 Pod limit 为 DinD 4/4Gi
+# 加 runner 4/1Gi 加 init 500m/256Mi（配额一旦写了 limits.*，含 init
+# 在内的每个容器都必须带 limit）。request 更低，才能和 standard 一起调度。
 maxRunners: 8
 imagePullSecrets:
   - name: arc-registry-pull
@@ -59,11 +61,14 @@ template:
           runAsUser: 0
           runAsGroup: 0
         resources:
-          # Requests only: limits would add 8×500m/256Mi on top of 64 CPU /
-          # 40Gi and block the eighth builder. The init copy is short-lived.
-          # 只写 request：limit 会在 64 CPU / 40Gi 之外再加 8×500m/256Mi，
-          # 挡住第 8 个 builder。init 拷贝过程很短。
+          # ResourceQuota hard limits.cpu/memory require every container
+          # to set limits, including this short-lived copy init.
+          # ResourceQuota 一旦写了 limits.cpu/memory，含这个短命拷贝
+          # init 在内的每个容器都必须带 limit。
           requests:
+            cpu: 500m
+            memory: 256Mi
+          limits:
             cpu: 500m
             memory: 256Mi
         volumeMounts:

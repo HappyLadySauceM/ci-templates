@@ -67,7 +67,7 @@ push dev
 | Runner / Secret | 用途 |
 | --- | --- |
 | `hls-standard`（最多 8，request 2 CPU / 1Gi，limit 4 CPU / 4Gi） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup、飞书通知 |
-| `hls-builder`（最多 8，DinD 4 CPU / 4Gi + runner 4 CPU / 1Gi；request 更低） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
+| `hls-builder`（最多 8，DinD 4 CPU / 4Gi + runner 4 CPU / 1Gi + init 500m / 256Mi；request 更低） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
 | `arc-github-app` | ARC 在每个 runner namespace 注册 ephemeral runner |
 | `HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM` | Harbor pull/push 与 TLS |
 | `K3S_RELEASE_KUBECONFIG` | deploy-release 的集群访问 |
