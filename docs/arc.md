@@ -237,4 +237,5 @@ ARC 是**组织级**的。新仓库不要自己装 controller，也不要新建 
    [Knowledge-Core-Web](https://github.com/HappyLadySauceM/Knowledge-Core-Web)。
 
 job 切分、Harbor candidate、GitOps CAS 与聚合 Release 见 [消费指南](consume.md)
-和 [发布](release.md)。
+和 [发布](release.md)。流水线状态看板故意运行在 GitHub 托管 runner，以免 ARC
+整体故障时无法上报，见 [飞书 CICD 任务看板](feishu-task-board.md)。

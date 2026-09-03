@@ -40,7 +40,8 @@ push dev
         → argo-wait → smoke → Harbor tag promotion + release
         → 失败且冒烟未通过则 rollback-snapshot
   → standard cleanup-candidates
-  → standard notify: 始终发 CICD 卡；仅当 deploy-release 产出 release_tag 再发蓝色发版卡
+  → notify: 看板未启用时发 CICD 卡；deploy-release 产出 release_tag 时发蓝色发版卡
+  → ubuntu-latest task tracker: 看板启用后同步执行中与终态
 ```
 
 要点：
@@ -153,6 +154,9 @@ DeepSeek 请求最多重试 3 次；密钥缺失、超时、空响应或失败�
 [`.github/actions/feishu-notify`](../.github/actions/feishu-notify/)。
 
 ### CICD 任务看板
+
+完整配置、接入模板、初始化/启用顺序、回滚与排障以
+[飞书 CICD 任务看板](feishu-task-board.md)为准。本节只保留行为和配置摘要。
 
 任务看板接入后，流水线状态不再发群卡片。一个仓库的主流水线对应一个长期
 复用的飞书任务；任务保持未完成，用统一清单中的 `未触发`、`执行中`、
