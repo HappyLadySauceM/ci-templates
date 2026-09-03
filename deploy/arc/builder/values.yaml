@@ -55,7 +55,7 @@ template:
         effect: NoSchedule
     initContainers:
       - name: init-dind-externals
-        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0-r4
+        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0-r5
         command: ["cp", "-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
         securityContext:
           runAsUser: 0
@@ -115,7 +115,7 @@ template:
             subPath: ca.crt
             readOnly: true
       - name: runner
-        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0-r4
+        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0-r5
         imagePullPolicy: IfNotPresent
         command: ["/home/runner/run.sh"]
         env:

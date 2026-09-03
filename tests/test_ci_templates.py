@@ -6,7 +6,7 @@ import tarfile
 import tempfile
 import subprocess
 import sys
-from unittest.mock import call, patch
+from unittest.mock import ANY, call, patch
 
 import unittest
 
@@ -824,6 +824,7 @@ class CiTemplatesTest(unittest.TestCase):
             with patch.dict("ci_templates.build.os.environ", environment, clear=True):
                 docker.side_effect = [
                     subprocess.CompletedProcess([], 1),  # builder does not exist
+                    subprocess.CompletedProcess([], 0),  # pull configured BuildKit image
                     subprocess.CompletedProcess([], 0),  # create
                 ]
                 self.assertEqual(_ensure_builder(config().services[0], 1, "."), "kapok-ci")
@@ -842,6 +843,7 @@ class CiTemplatesTest(unittest.TestCase):
                 docker.side_effect = [
                     subprocess.CompletedProcess([], 0),  # existing builder
                     subprocess.CompletedProcess([], 0),  # remove stale builder
+                    subprocess.CompletedProcess([], 0),  # pull configured BuildKit image
                     subprocess.CompletedProcess([], 0),  # recreate
                 ]
                 self.assertEqual(_ensure_builder(config().services[0], 1, "."), "kapok-ci")
@@ -852,11 +854,19 @@ class CiTemplatesTest(unittest.TestCase):
         )
         self.assertEqual(
             docker.call_args_list[2],
-            call(["buildx", "inspect", "kapok-ci"], cwd=".", check=False),
+            call(["buildx", "create", "--driver", "docker-container", "--driver-opt", "image=moby/buildkit:buildx-stable-1", "--driver-opt", "network=host", "--name", "kapok-ci", "--buildkitd-config", ANY], cwd="."),
         )
         self.assertEqual(
             docker.call_args_list[3],
+            call(["buildx", "inspect", "kapok-ci"], cwd=".", check=False),
+        )
+        self.assertEqual(
+            docker.call_args_list[4],
             call(["buildx", "rm", "--force", "kapok-ci"], cwd="."),
+        )
+        self.assertEqual(
+            docker.call_args_list[5],
+            call(["pull", "moby/buildkit:buildx-stable-1"], cwd="."),
         )
 
     @patch("ci_templates.build._builder_matches", return_value=True)
@@ -934,15 +944,19 @@ class CiTemplatesTest(unittest.TestCase):
         import tempfile
         observed = []
         observed_create_args = []
+        observed_pulls = []
 
         def run(args, **_kwargs):
             if args[:2] == ["buildx", "inspect"]:
                 return subprocess.CompletedProcess([], 1)
+            if args[:1] == ["pull"]:
+                observed_pulls.append(args)
+                return subprocess.CompletedProcess([], 1 if args[1] == "org/gateway:dev" else 0)
             if args[:2] == ["buildx", "create"]:
                 config_path = Path(args[args.index("--buildkitd-config") + 1])
                 observed.append(config_path.read_text(encoding="utf-8"))
                 observed_create_args.append(args)
-            return subprocess.CompletedProcess([], 1 if args[0] == "pull" else 0)
+            return subprocess.CompletedProcess([], 0)
 
         docker.side_effect = run
         with tempfile.TemporaryDirectory() as directory:
@@ -953,6 +967,7 @@ class CiTemplatesTest(unittest.TestCase):
                 build_service(config().services[0])
 
         self.assertEqual(len(observed), 1)
+        self.assertEqual(observed_pulls, [["pull", "org/gateway:dev"], ["pull", buildkit_image]])
         self.assertEqual(observed_create_args[0][observed_create_args[0].index("--driver-opt") + 1], f"image={buildkit_image}")
         self.assertIn("[worker.oci]", observed[0])
         self.assertIn(f"max-parallelism = {build_jobs()}", observed[0])

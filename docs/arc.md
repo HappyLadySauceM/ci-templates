@@ -165,7 +165,9 @@ runner cgroup 算。当前两边 limit 都是 `"4"`，所以 `BUILD_JOBS`≈3。
 - BuildKit：`hls-builder` 的 `BUILDKIT_IMAGE` 固定为
   `harbor.happyladysauce.local/infrastructure/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8`；
   该多架构镜像与 upstream `moby/buildkit:buildx-stable-1` digest 一致，避免
-  Buildx 冷启动访问 Docker Hub。
+  Buildx 冷启动访问 Docker Hub。创建 `docker-container` builder 前，CLI 会先用
+  runner 的 Harbor `DOCKER_CONFIG` 显式拉取该镜像，避免 DinD daemon 因未携带
+  runner 凭据而收到 `unauthorized`。
 - 控制镜像 `knowledge-core/ci-templates:vVERSION` 仍会发布，供本仓库测试或非
   ARC 场景；**接在 ARC 上的应用 workflow 直接调用 runner 里的 CLI**，不要再
   `docker run` 控制镜像。

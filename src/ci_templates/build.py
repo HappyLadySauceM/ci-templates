@@ -278,6 +278,11 @@ def _ensure_builder(
     ]
     buildkit_config: tempfile.TemporaryDirectory[str] | None = None
     try:
+        # The docker-container driver asks the Docker daemon to pull its image.
+        # An explicit client-side pull sends the configured registry auth to
+        # DinD before buildx creates the driver container; otherwise the daemon
+        # may try the pull without the runner's DOCKER_CONFIG credentials.
+        _docker(["pull", buildkit_image], cwd=cwd)
         buildkit_config = tempfile.TemporaryDirectory(prefix="ci-templates-buildkit-")
         config_path = Path(buildkit_config.name) / "buildkitd.toml"
         config_path.write_text(
