@@ -115,7 +115,7 @@ template:
             subPath: ca.crt
             readOnly: true
       - name: runner
-        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0-r5
+        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0-r7
         imagePullPolicy: IfNotPresent
         command: ["/home/runner/run.sh"]
         env:

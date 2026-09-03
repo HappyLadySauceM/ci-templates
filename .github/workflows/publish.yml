@@ -103,10 +103,17 @@ jobs:
           RUNNER_IMAGE_TAG: ${{ steps.config.outputs.runner_image_tag }}
         run: |
           set -euo pipefail
-          grep -R --fixed-strings -- "hls-actions-runner:$RUNNER_IMAGE_TAG" deploy/arc >/dev/null || {
-            echo "ARC values must reference the configured runner image tag $RUNNER_IMAGE_TAG" >&2
+          expected_runner_image="$RUNNER_IMAGE:$RUNNER_IMAGE_TAG"
+          grep -R --fixed-strings -- "image: $expected_runner_image" deploy/arc >/dev/null || {
+            echo "ARC values must reference $expected_runner_image" >&2
             exit 1
           }
+          stale_runner_images="$(grep -R --line-number -- 'image: .*hls-actions-runner:' deploy/arc | grep --invert-match --fixed-strings -- "image: $expected_runner_image" || true)"
+          if [[ -n "$stale_runner_images" ]]; then
+            echo "ARC values contain runner image references that do not match $expected_runner_image:" >&2
+            echo "$stale_runner_images" >&2
+            exit 1
+          fi
           version="$(tr -d '[:space:]' < VERSION)"
           case "$version" in
             ''|*[!0-9.]*|.*|*.) echo "invalid VERSION: $version" >&2; exit 1 ;;
