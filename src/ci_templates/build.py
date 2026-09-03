@@ -314,6 +314,23 @@ def _ensure_builder(
     return name
 
 
+def verify_builder(service: Service, cwd: str = ".") -> dict[str, object]:
+    """Create or reuse BuildKit and prove its configured image can boot.
+
+    Keeping this separate from an image build makes a private-image or
+    credential failure stop a workflow before its candidate matrix fans out.
+    """
+    jobs = build_jobs()
+    builder = _ensure_builder(service, jobs, cwd)
+    _docker(["buildx", "inspect", "--bootstrap", builder], cwd=cwd)
+    return {
+        "available_cpus": available_cpus(),
+        "builder": builder,
+        "buildkit_image": _configured_buildkit_image(),
+        "jobs": jobs,
+    }
+
+
 def _validate_artifact_manifest(service: Service, manifest: str | None, cwd: str) -> None:
     if not manifest:
         return

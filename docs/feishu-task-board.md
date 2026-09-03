@@ -6,12 +6,13 @@
 ## 架构与边界
 
 ```text
-GitHub 主流水线（ARC）
-  └─ workflow_run: requested / in_progress / completed
-       └─ feishu-pipeline-task（ubuntu-latest，与 ARC 隔离）
-            ├─ GitHub API：本次提交与贡献者
-            ├─ 飞书通讯录：群成员 + GitHub 自定义字段
-            └─ 飞书 Task V2：清单、分组、任务、关注人
+GitHub 主流水线
+  ├─ track-start（ubuntu-latest）→ 执行中
+  ├─ ARC：验证、构建、发布
+  └─ notify（ubuntu-latest）→ 执行完毕 / 执行出错
+       ├─ GitHub API：本次提交、失败 job 与贡献者
+       ├─ 飞书通讯录：群成员 + GitHub 自定义字段
+       └─ 飞书 Task V2：清单、分组、任务、关注人
 ```
 
 每个仓库的主流水线对应一个长期复用的任务，标题固定为
@@ -38,6 +39,7 @@ GitHub 主流水线（ARC）
 2. 开通并发布以下权限：
    - `task:task:write`
    - `task:tasklist:write`
+   - `task:section:write`
    - `im:chat.members:read`
    - `contact:contact.base:readonly`
    - `contact:user.employee:readonly`
@@ -70,37 +72,23 @@ Secret 不得写入 workflow、仓库文件、日志、任务描述或任务 `ex
 
 ## 接入 workflow
 
-监听文件必须存在于仓库默认分支，否则 GitHub 不会触发 `workflow_run`。任务同步
-使用 GitHub 托管 runner，避免 ARC 整体故障时错误状态也无法上报。不要 checkout
-触发流水线的代码；只读取 GitHub API 和事件正文。
+任务同步嵌入业务主流水线，但两个同步 job 都使用 GitHub 托管 runner，不占 ARC。
+不要 checkout 触发流水线的代码；Action 只读取 GitHub Run API。开始同步和终态同步
+都应使用 `continue-on-error: true`，飞书配置故障不能把业务 CI 变红。
 
 ```yaml
-name: feishu-pipeline-task
-
-on:
-  workflow_dispatch:
-  workflow_run:
-    workflows: [knowledge-core-pipeline]
-    types: [requested, in_progress, completed]
-
-permissions:
-  actions: read
-  contents: read
-
-concurrency:
-  group: ${{ github.repository }}-feishu-pipeline-task
-  cancel-in-progress: false
-
 jobs:
-  track:
-    if: github.event_name == 'workflow_dispatch' || vars.FEISHU_TASK_TRACKER_ENABLED == 'true'
+  track-start:
+    if: vars.FEISHU_TASK_TRACKER_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: release
+    continue-on-error: true
     steps:
-      - uses: HappyLadySauceM/ci-templates/.github/actions/feishu-pipeline-task@21d1752cc7f4fda3237cd7229be20ee3e608f1cf
+      - uses: HappyLadySauceM/ci-templates/.github/actions/feishu-pipeline-task@<pinned-sha>
         with:
-          operation: ${{ github.event_name == 'workflow_dispatch' && 'provision' || 'sync' }}
+          operation: sync
+          phase: in_progress
           app-id: ${{ vars.FEISHU_APP_ID }}
           app-secret: ${{ secrets.FEISHU_APP_SECRET }}
           chat-id: ${{ vars.FEISHU_CHAT_ID }}
@@ -109,6 +97,10 @@ jobs:
           github-token: ${{ github.token }}
           deepseek-api-key: ${{ secrets.DEEPSEEK_API_KEY }}
 ```
+
+在主流水线末尾的 `notify` 中，启用看板时再调用同一 Action，传入
+`phase: completed` 及根据 `needs.*.result` 计算出的 `conclusion`。未启用时保留
+原 CICD 群卡；Release 卡片不受影响。
 
 业务流水线末尾的旧 CICD 卡片加切换条件；Release 卡片不要加该条件：
 
@@ -127,11 +119,10 @@ jobs:
 严格按下面顺序切换，任何一步失败都不要提前关旧卡片：
 
 1. 先发布并验证 `ci-templates` 的任务 Action。
-2. 把监听 workflow 推到应用仓库默认分支，保持
+2. 将主流水线中的任务同步步骤推到 `dev`，保持
    `FEISHU_TASK_TRACKER_ENABLED` 未设置或为 `false`。
 3. 配置飞书应用权限、通讯录范围、自定义字段和全部 GitHub Secret/Variables。
-4. 手动运行一次 `feishu-pipeline-task`。`workflow_dispatch` 使用 `provision`，会
-   幂等创建统一清单、四个分组、群 editor 权限以及“未触发”任务。
+4. 启用后首次主流水线会幂等创建统一清单、四个分组、群 editor 权限及任务。
 5. 在飞书确认任务标题、清单共享范围和四个分组后，将
    `FEISHU_TASK_TRACKER_ENABLED` 设为 `true`。
 6. 触发一次成功流水线，再验证一次失败或取消、失败重跑成功。确认状态依次进入
@@ -160,8 +151,7 @@ Push 流水线通过同分支上一条不同 run 的 SHA 与当前 SHA 比较提
 # Action 单测
 PYTHONPATH=src python3 -m unittest tests.test_feishu_pipeline_task -v
 
-# 查监听和主流水线
-gh run list --workflow feishu-pipeline-task.yml --limit 10
+# 查主流水线
 gh run list --workflow pipeline.yml --limit 10
 
 # ARC 故障与任务监听相互独立；此命令只检查业务 runner
@@ -170,16 +160,16 @@ kubectl get pods -A
 
 | 现象 | 检查 |
 | --- | --- |
-| workflow 不出现在 Actions | 文件是否已在 GitHub 默认分支；`workflows:` 名称是否与主 workflow 的 `name:` 完全一致 |
-| 手动初始化被 skipped | workflow 的 job 条件必须允许 `workflow_dispatch`，不要只检查 enabled 变量 |
+| 任务未创建 | 检查主流水线中的 `track-start`；确认 enabled Variable 已设为 `true` |
 | 获取 tenant token 失败 | App ID/Secret 是否同一应用，应用版本是否已发布 |
 | 清单或任务返回 403 | `task:task:write`、`task:tasklist:write` 是否发布，清单是否由当前应用拥有 |
+| 分组接口返回 400/99991672 | 必须单独开通并发布 `task:section:write`；`task:tasklist:write` 不能代替分组权限 |
 | 群成员读取失败 | 机器人是否在群内，是否有 `im:chat.members:read` |
 | 自定义字段找不到 | 使用字段 ID；管理员是否开启 API 调用；字段是否为通用 TEXT/HREF |
 | 用户始终匹配不到 | 应用通讯录范围、群成员身份、字段值及 `contact:user.employee:readonly` |
 | 出现同名清单/分组/任务 | 不自动选择任意一个；先人工确认并清理重复项，再重跑 provision |
-| 任务状态没有更新但主 CI 正常 | 查看独立监听 workflow；它运行在 `ubuntu-latest`，不是 ARC |
-| 主 CI runner 失联 | `kubectl get pods -A` 检查 ARC controller、listener、ephemeral runner；任务监听仍应写入错误终态 |
+| 任务状态没有更新但主 CI 正常 | 查看主流水线 `track-start` 或 `notify`；两者均运行在 `ubuntu-latest` |
+| 重跑失败 job 后任务暂未回到执行中 | 独立 `track-start` 已成功不会被 rerun；等待 rerun 的 `notify` 写入新终态，或选择 Re-run all jobs |
 
 同步器对 HTTP 408、429 和 5xx 最多重试三次。非重试错误会让独立监听 workflow
 失败，但不会改变原主流水线结论；修复权限或配置后可直接 Re-run jobs。

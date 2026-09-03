@@ -8,7 +8,7 @@ spec:
     pods: "12"
     requests.cpu: "32"
     requests.memory: 32Gi
-    limits.cpu: "32"
+    limits.cpu: "64"
     limits.memory: 64Gi
 ---
 apiVersion: v1

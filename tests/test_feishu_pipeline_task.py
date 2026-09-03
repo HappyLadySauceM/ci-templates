@@ -74,6 +74,22 @@ class StateTest(unittest.TestCase):
         self.assertTrue(task_tracker.is_stale_or_duplicate(extra, (200, 2, 2), "执行完毕"))
         self.assertFalse(task_tracker.is_stale_or_duplicate(extra, (200, 3, 1), "执行中"))
 
+    def test_inline_run_overlays_terminal_conclusion(self):
+        github = MagicMock()
+        github.get.return_value = workflow_run(conclusion=None)
+        run, action = task_tracker.inline_workflow_run(github, "org/repo", "200", "completed", "failure")
+        self.assertEqual(action, "completed")
+        self.assertEqual(run["conclusion"], "failure")
+        self.assertIn("/actions/runs/200", github.get.call_args.args[0])
+
+    def test_inline_run_rejects_invalid_phase_or_conclusion(self):
+        github = MagicMock()
+        github.get.return_value = workflow_run()
+        with self.assertRaisesRegex(task_tracker.TrackerError, "TRACKER_PHASE"):
+            task_tracker.inline_workflow_run(github, "org/repo", "200", "started")
+        with self.assertRaises(task_tracker.TrackerError):
+            task_tracker.inline_workflow_run(github, "org/repo", "200", "completed", "mystery")
+
 
 class ContributorTest(unittest.TestCase):
     def test_push_compares_with_previous_distinct_run(self):

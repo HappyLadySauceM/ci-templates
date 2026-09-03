@@ -36,6 +36,7 @@ from ci_templates.build import (
     build_jobs,
     build_service,
     image_digest,
+    verify_builder,
 )
 from ci_templates.argocd import (
     ArgoError,
@@ -867,6 +868,30 @@ class CiTemplatesTest(unittest.TestCase):
         self.assertEqual(
             docker.call_args_list[5],
             call(["pull", "moby/buildkit:buildx-stable-1"], cwd="."),
+        )
+
+    @patch("ci_templates.build._docker")
+    @patch("ci_templates.build._ensure_builder", return_value="ci-templates")
+    @patch("ci_templates.build.available_cpus", return_value=8)
+    @patch("ci_templates.build.build_jobs", return_value=8)
+    def test_builder_check_bootstraps_the_configured_builder(self, jobs, cpus, ensure, docker):
+        docker.return_value = subprocess.CompletedProcess([], 0)
+        with patch.dict(
+            "ci_templates.build.os.environ",
+            {"BUILDKIT_IMAGE": "harbor.example/buildkit:stable"},
+            clear=True,
+        ):
+            result = verify_builder(config().services[0], ".")
+
+        self.assertEqual(result, {
+            "available_cpus": 8,
+            "builder": "ci-templates",
+            "buildkit_image": "harbor.example/buildkit:stable",
+            "jobs": 8,
+        })
+        ensure.assert_called_once_with(config().services[0], 8, ".")
+        docker.assert_called_once_with(
+            ["buildx", "inspect", "--bootstrap", "ci-templates"], cwd="."
         )
 
     @patch("ci_templates.build._builder_matches", return_value=True)

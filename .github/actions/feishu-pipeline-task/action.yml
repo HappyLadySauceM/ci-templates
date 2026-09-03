@@ -3,7 +3,7 @@ description: Synchronize one GitHub Actions pipeline with a reusable Feishu task
 
 inputs:
   operation:
-    description: provision creates the board/task; sync consumes a workflow_run event
+    description: provision creates the board/task; sync consumes workflow_run or inline phase inputs
     required: false
     default: sync
   app-id:
@@ -35,6 +35,14 @@ inputs:
     default: ""
   deepseek-api-key:
     description: DeepSeek key for terminal-state notes; deterministic text is used when unavailable
+    required: false
+    default: ""
+  phase:
+    description: Inline sync phase: in_progress or completed; omit for workflow_run events
+    required: false
+    default: ""
+  conclusion:
+    description: Terminal GitHub conclusion for an inline completed phase
     required: false
     default: ""
 
@@ -69,4 +77,6 @@ runs:
         TRACKER_WORKFLOW_NAME: ${{ inputs.workflow-name }}
         GITHUB_TOKEN: ${{ inputs.github-token || github.token }}
         DEEPSEEK_API_KEY: ${{ inputs.deepseek-api-key }}
+        TRACKER_PHASE: ${{ inputs.phase }}
+        TRACKER_CONCLUSION: ${{ inputs.conclusion }}
       run: python3 "${{ github.action_path }}/task_tracker.py"

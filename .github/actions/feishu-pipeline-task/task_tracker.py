@@ -400,22 +400,77 @@ def _display_title(run: dict[str, Any]) -> str:
     return str(run.get("display_title") or run.get("name") or "CI").splitlines()[0].strip()
 
 
-def task_description(repository: str, run: dict[str, Any], state: str, greeting: str = "") -> str:
+def failed_job_names(github: GitHubApi, repository: str, run: dict[str, Any]) -> list[str]:
+    run_id = int(run.get("id") or 0)
+    if not run_id:
+        return []
+    try:
+        response = github.get("/repos/%s/actions/runs/%s/jobs" % (repository, run_id), {"per_page": 100})
+    except TrackerError:
+        log.warning("Could not list failed jobs for workflow run %s", run_id)
+        return []
+    jobs = response.get("jobs") if isinstance(response, dict) else []
+    return [
+        str(job.get("name") or "")
+        for job in jobs or []
+        if isinstance(job, dict)
+        and str(job.get("conclusion") or "").lower() in ERROR_CONCLUSIONS
+        and str(job.get("name") or "")
+    ][:10]
+
+
+def inline_workflow_run(
+    github: GitHubApi,
+    repository: str,
+    run_id: str,
+    phase: str,
+    conclusion: str = "",
+) -> tuple[dict[str, Any], str]:
+    """Load the active run and overlay state unavailable until it completes."""
+    normalized_phase = phase.strip().lower()
+    if normalized_phase not in {"in_progress", "completed"}:
+        raise TrackerError("TRACKER_PHASE must be in_progress or completed")
+    if not run_id.isdigit() or int(run_id) < 1:
+        raise TrackerError("GITHUB_RUN_ID must be a positive integer for inline sync")
+    response = github.get("/repos/%s/actions/runs/%s" % (repository, run_id))
+    if not isinstance(response, dict) or not response:
+        raise TrackerError("GitHub workflow run lookup returned no run")
+    run = dict(response)
+    if normalized_phase == "in_progress":
+        run["conclusion"] = ""
+        return run, "in_progress"
+    normalized_conclusion = conclusion.strip().lower()
+    board_state("completed", normalized_conclusion)
+    run["conclusion"] = normalized_conclusion
+    # notify runs before GitHub marks the enclosing workflow complete.
+    run["updated_at"] = datetime.now().astimezone().isoformat()
+    return run, "completed"
+
+
+def task_description(
+    repository: str,
+    run: dict[str, Any],
+    state: str,
+    greeting: str = "",
+    failed_jobs: list[str] | None = None,
+) -> str:
     started = str(run.get("run_started_at") or run.get("created_at") or "")
     ended = str(run.get("updated_at") or datetime.now().astimezone().isoformat())
     duration = format_duration(started, ended) if started and state in {"执行完毕", "执行出错"} else ""
     lines = [
         _display_title(run),
-        "- Workflow: %s" % str(run.get("name") or ""),
-        "- Status: %s" % state,
-        "- Conclusion: %s" % str(run.get("conclusion") or ""),
-        "- Branch: %s" % str(run.get("head_branch") or ""),
-        "- Actor: %s" % workflow_actor(run),
-        "- Run: #%s / attempt %s" % (run.get("run_number") or "", run.get("run_attempt") or 1),
+        "• Workflow: %s" % str(run.get("name") or ""),
+        "• Status: %s" % state,
+        "• Conclusion: %s" % str(run.get("conclusion") or ""),
+        "• Branch: %s" % str(run.get("head_branch") or ""),
+        "• Actor: %s" % workflow_actor(run),
+        "• Run: #%s / attempt %s" % (run.get("run_number") or "", run.get("run_attempt") or 1),
     ]
     if duration:
-        lines.append("- Duration: %s" % duration)
-    lines.append("- Open run: %s" % _run_url(repository, run))
+        lines.append("• Duration: %s" % duration)
+    if failed_jobs:
+        lines.append("• Failed jobs: %s" % "、".join(failed_jobs))
+    lines.append("• Open run: %s" % _run_url(repository, run))
     if greeting:
         lines.extend(["", "DeepSeek：%s" % greeting])
     return "\n".join(lines)[:3000]
@@ -662,7 +717,8 @@ class PipelineTracker:
                 },
             }
         )
-        description = task_description(self.repository, run, state, greeting)
+        failures = failed_job_names(self.github, self.repository, run) if state == "执行出错" else []
+        description = task_description(self.repository, run, state, greeting, failures)
         if task is None:
             task = self.create_task(
                 str(tasklist["guid"]),
@@ -772,8 +828,18 @@ def main() -> int:
             attr_id=_required_env("FEISHU_GITHUB_CUSTOM_ATTR_ID"),
             tasklist_name=os.environ.get("FEISHU_TASKLIST_NAME", "CICD 流水线").strip() or "CICD 流水线",
         )
+        phase = os.environ.get("TRACKER_PHASE", "").strip()
         if operation == "provision":
             result = tracker.provision()
+        elif phase:
+            run, action = inline_workflow_run(
+                github,
+                repository,
+                _required_env("GITHUB_RUN_ID"),
+                phase,
+                os.environ.get("TRACKER_CONCLUSION", ""),
+            )
+            result = tracker.sync(run, action)
         else:
             path = _required_env("GITHUB_EVENT_PATH")
             with open(path, encoding="utf-8") as handle:

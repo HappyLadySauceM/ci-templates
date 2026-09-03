@@ -10,7 +10,7 @@ from pathlib import Path
 from .changes import affected_services, build_release_context, changed_paths, deploy_changed, deploy_services, read_release_context, release_services, resolve_revision, write_release_context
 from .config import ConfigError, load_config
 from .gitops import sync_snapshot, promote_snapshot, rollback_snapshot
-from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest
+from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest, verify_builder
 from .argocd import wait_applications, wait_targets
 from .smoke import run as run_smoke, run_kubernetes
 from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
@@ -107,6 +107,10 @@ def main(argv: list[str] | None = None) -> int:
     prewarm = subparsers.add_parser("prewarm")
     prewarm.add_argument("--config", default=None)
     prewarm.add_argument("--repo", default=".")
+
+    builder_check = subparsers.add_parser("builder-check")
+    builder_check.add_argument("--config", default=None)
+    builder_check.add_argument("--repo", default=".")
 
     status = subparsers.add_parser("status")
     status.add_argument("--config", default=None)
@@ -377,7 +381,11 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"deployed": deployed, "release": aggregate_tag}, sort_keys=True))
         elif args.command == "prewarm":
             config = load_config(args.config)
+            verify_builder(config.services[0], cwd=args.repo)
             prewarm_base_images(config.base_images, cwd=args.repo)
+        elif args.command == "builder-check":
+            config = load_config(args.config)
+            print(json.dumps(verify_builder(config.services[0], cwd=args.repo), sort_keys=True))
         elif args.command == "status":
             config = load_config(args.config)
             set_commit_status(
