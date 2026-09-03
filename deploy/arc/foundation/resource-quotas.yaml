@@ -9,7 +9,7 @@ spec:
     requests.cpu: "32"
     requests.memory: 32Gi
     limits.cpu: "32"
-    limits.memory: 32Gi
+    limits.memory: 64Gi
 ---
 apiVersion: v1
 kind: ResourceQuota

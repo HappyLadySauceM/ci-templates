@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 from urllib.error import HTTPError
 from io import BytesIO
 
@@ -334,17 +334,68 @@ class FeishuCardTest(unittest.TestCase):
         )
         self.assertIn("今天流水线很顺利，记得歇口气。", card["card"]["elements"][0]["text"]["content"])
 
-    def test_summarize_ci_greeting_returns_empty_without_key(self):
+    def test_summarize_ci_greeting_uses_failure_fallback_without_key(self):
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}, clear=False):
-            self.assertEqual(notify.summarize_ci_greeting("ok", "1s", "dev", "success"), "")
+            self.assertEqual(
+                notify.summarize_ci_greeting("ok", "1s", "dev", "failure"),
+                "流水线执行失败，请点击 Open run 查看失败步骤。",
+            )
 
-    def test_summarize_ci_greeting_returns_empty_on_http_error(self):
+    def test_summarize_ci_greeting_retries_transient_http_error_then_falls_back(self):
         def boom(*args, **kwargs):
             raise HTTPError("https://api.deepseek.com", 500, "boom", hdrs=None, fp=BytesIO(b"err"))
 
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}, clear=False):
             with patch.object(notify, "urlopen", boom):
-                self.assertEqual(notify.summarize_ci_greeting("ok", "1s", "dev", "success"), "")
+                with patch.object(notify.time, "sleep") as sleep:
+                    self.assertEqual(
+                        notify.summarize_ci_greeting("ok", "1s", "dev", "success"),
+                        "流水线已成功完成，辛苦了，记得稍作休息。",
+                    )
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+
+    def test_summarize_ci_greeting_retries_empty_content_then_returns_text(self):
+        class _Response:
+            def __init__(self, content):
+                self.content = content
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {"choices": [{"message": {"content": self.content}}]}
+                ).encode()
+
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}, clear=False):
+            with patch.object(
+                notify,
+                "urlopen",
+                side_effect=[_Response(""), _Response("今天构建通过，记得休息。")],
+            ) as urlopen:
+                with patch.object(notify.time, "sleep") as sleep:
+                    result = notify.summarize_ci_greeting("ok", "1s", "dev", "success")
+        self.assertEqual(result, "今天构建通过，记得休息。")
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(1)
+        requests = [json.loads(call.args[0].data) for call in urlopen.call_args_list]
+        self.assertEqual([request["max_tokens"] for request in requests], [1024, 2048])
+
+    def test_summarize_ci_greeting_does_not_retry_non_retryable_http_error(self):
+        def unauthorized(*args, **kwargs):
+            raise HTTPError("https://api.deepseek.com", 401, "unauthorized", hdrs=None, fp=BytesIO(b"err"))
+
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}, clear=False):
+            with patch.object(notify, "urlopen", side_effect=unauthorized) as urlopen:
+                with patch.object(notify.time, "sleep") as sleep:
+                    result = notify.summarize_ci_greeting("ok", "1s", "dev", "cancelled")
+        self.assertEqual(result, "流水线已取消，请点击 Open run 查看执行记录。")
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
 
     def test_previous_release_tag_skips_the_current_tag(self):
         releases = [

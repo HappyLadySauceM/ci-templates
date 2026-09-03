@@ -67,14 +67,14 @@ push dev
 
 | Runner / Secret | 用途 |
 | --- | --- |
-| `hls-standard`（最多 8，request 2 CPU / 1Gi，limit 4 CPU / 4Gi） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup、飞书通知 |
+| `hls-standard`（最多 8，request 2 CPU / 4Gi，limit 4 CPU / 8Gi） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup、飞书通知 |
 | `hls-builder`（最多 8，DinD 4 CPU / 4Gi + runner 4 CPU / 1Gi + init 500m / 256Mi；request 更低） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
 | `arc-github-app` | ARC 在每个 runner namespace 注册 ephemeral runner |
 | `HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM` | Harbor pull/push 与 TLS |
 | `K3S_RELEASE_KUBECONFIG` | deploy-release 的集群访问 |
 | `GH_APP_ID`、`GH_APP_PRIVATE_KEY` | 访问源仓库、deploy、status 与 Release |
 | `GITOPS_TOKEN` | ci-templates runner snapshot 推送 |
-| `DEEPSEEK_API_KEY` | release-notes 的单次摘要，以及 pipeline/publish 末尾 CI 飞书卡的可选问候 |
+| `DEEPSEEK_API_KEY` | release-notes 的单次摘要，以及 pipeline/publish 末尾 CI 飞书卡的 AI 问候；缺失时使用固定回退文案 |
 | `CI_PROJECT_CONFIG` | `.ci/pipeline.yaml` 配置路径 |
 | `CI_GITOPS_IMAGE_OVERRIDES_JSON` | promote-snapshot / argo-wait 的 digest |
 | `CI_RELEASE_CHANGES_FILE` | 未传 `--changes-file` 时的 release 上下文 |
@@ -87,6 +87,10 @@ push dev
 `FEISHU_WEBHOOK_*` 放在组织 Actions secrets，**不要**放进 `release`
 environment，否则 PR/Issue 通知会卡在 environment 审批。不要写入
 values、SOPS、workflow 明文或日志。
+
+使用本仓库 `publish.yml` 的 `release` environment 也必须配置
+`DEEPSEEK_API_KEY` 才能生成真正的 DeepSeek CI 问候；未配置时卡片仍会发送，
+但只会显示固定回退文案。应用仓库的 `pipeline.yml` 同理。
 
 标准 runner 不挂宿主机 Docker socket；builder 使用 Pod 内隔离的 Docker-in-
 Docker，并将 Harbor CA 以 Secret 挂入 daemon。每个 runner Pod 的 workspace
@@ -137,8 +141,9 @@ digest 的可变 tag 不得用于那种非 ARC 的生产调用。
 
 CI 成败在 `pipeline.yml` / `publish.yml` / Skill-Constructor `ci.yml` **末尾
 job** 发飞书（`if: always()`）。CI 卡标题为 `CICD：` 加 commit 标题，带耗时
-和 run 链接，**不列 Artifacts**；有 `DEEPSEEK_API_KEY` 时加一句中文问候，
-没有或失败则只发结构化字段。
+和 run 链接，**不列 Artifacts**；有 `DEEPSEEK_API_KEY` 时加一句中文问候。
+DeepSeek 请求最多重试 3 次；密钥缺失、超时、空响应或失败时记录 warning，
+并使用固定中文回退文案，不能阻断 CI 卡片发送。
 发版卡只在同一条 pipeline 真正创建了 GitHub Release（`release_tag` 非空）时
 发送，蓝色标题，Notes 保留换行且不含正文版本号。
 独立 workflow `.github/workflows/feishu-notify.yml` 只覆盖 PR、Issue、Review
@@ -181,8 +186,7 @@ Webhook POST `https://open.feishu.cn/open-apis/bot/v2/hook/<id>`。签名按飞�
 
 1. 先把本仓库（含 Action）推到 `origin/main`。
 2. 应用仓复制 [`.github/workflows/feishu-notify.yml`](../.github/workflows/feishu-notify.yml)，
-   把 `uses:` 钉成该 Action 所在提交的 40 位 SHA（当前为
-   `8f39e9543c2d0e1bd26c5fcba8de6fbea5cfe8c6`）。本仓自己的 notify
+   把 `uses:` 钉成该 Action 发布提交的 40 位 SHA（每次改 Action 后更新）。本仓自己的 notify
    workflow 和 `publish.yml` 末尾 job 用 `uses: ./.github/actions/feishu-notify`，先 checkout。
 3. 本地验证 Action：`PYTHONPATH=src python3 -m unittest tests.test_feishu_notify -v`
 4. 在已接入仓上 `workflow_dispatch` 一次 `feishu-notify`，确认群里出现卡片。

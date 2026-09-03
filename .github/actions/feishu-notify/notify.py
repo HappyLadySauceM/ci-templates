@@ -39,6 +39,16 @@ HEADER_TEMPLATES = {
     "blue": "blue",
 }
 _VERSION_HEADING = re.compile(r"^#{1,6}\s*v?\d+\.\d+(?:\.\d+)?\b.*$", re.IGNORECASE)
+DEEPSEEK_TIMEOUT_SECONDS = 15
+DEEPSEEK_MAX_ATTEMPTS = 3
+DEEPSEEK_RETRY_DELAYS = (1, 2)
+DEEPSEEK_GREETING_MAX_TOKENS = (1024, 2048, 4096)
+DEEPSEEK_RETRYABLE_STATUS_CODES = frozenset({408, 429}) | frozenset(range(500, 600))
+CI_GREETING_FALLBACKS = {
+    "success": "流水线已成功完成，辛苦了，记得稍作休息。",
+    "failure": "流水线执行失败，请点击 Open run 查看失败步骤。",
+    "cancelled": "流水线已取消，请点击 Open run 查看执行记录。",
+}
 
 
 class NotifyError(RuntimeError):
@@ -294,14 +304,19 @@ def _repo_html(payload: dict[str, Any], repo: str) -> str:
 
 
 def summarize_ci_greeting(title: str, duration: str, branch: str, conclusion: str) -> str:
-    """Ask DeepSeek for a short Chinese greeting; empty on missing key or errors.
+    """Ask DeepSeek for a short Chinese greeting with a deterministic fallback.
 
-    向 DeepSeek 要一句中文问候；没有密钥或失败时返回空字符串。
+    向 DeepSeek 要一句中文问候；密钥缺失或请求失败时使用固定中文回退文案。
     """
 
+    fallback = CI_GREETING_FALLBACKS.get(
+        conclusion,
+        "流水线已结束，请点击 Open run 查看详情。",
+    )
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not api_key:
-        return ""
+        log.warning("DeepSeek CI greeting unavailable: API key is missing; using fallback")
+        return fallback
     endpoint = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/chat/completions")
     model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
     prompt = {
@@ -315,30 +330,68 @@ def summarize_ci_greeting(title: str, duration: str, branch: str, conclusion: st
         "branch": branch,
         "conclusion": conclusion,
     }
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
-        "temperature": 0.7,
-        "max_tokens": 300,
-    }
-    request = Request(
-        endpoint,
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": "Bearer %s" % api_key,
-            "Content-Type": "application/json; charset=utf-8",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=15) as response:
-            raw = response.read()
-        parsed = json.loads(raw.decode("utf-8") or "{}")
-        text = str(parsed["choices"][0]["message"]["content"] or "").strip()
-    except Exception:
-        log.exception("DeepSeek CI greeting failed")
-        return ""
-    return text[:500]
+    for attempt in range(1, DEEPSEEK_MAX_ATTEMPTS + 1):
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
+            "temperature": 0.7,
+            "max_tokens": DEEPSEEK_GREETING_MAX_TOKENS[attempt - 1],
+        }
+        request = Request(
+            endpoint,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer %s" % api_key,
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=DEEPSEEK_TIMEOUT_SECONDS) as response:
+                raw = response.read()
+            parsed = json.loads(raw.decode("utf-8") or "{}")
+            choices = parsed.get("choices") if isinstance(parsed, dict) else None
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                raise ValueError("response has no choices")
+            message = choices[0].get("message")
+            if not isinstance(message, dict):
+                raise ValueError("response has no message")
+            text = message.get("content")
+            if not isinstance(text, str) or not text.strip():
+                finish_reason = choices[0].get("finish_reason", "unknown")
+                raise ValueError("response content is empty (finish_reason=%s)" % finish_reason)
+            return text.strip()[:500]
+        except HTTPError as exc:
+            retryable = exc.code in DEEPSEEK_RETRYABLE_STATUS_CODES
+            log.warning(
+                "DeepSeek CI greeting attempt %d/%d failed: HTTP %s%s",
+                attempt,
+                DEEPSEEK_MAX_ATTEMPTS,
+                exc.code,
+                "; retrying" if retryable and attempt < DEEPSEEK_MAX_ATTEMPTS else "; using fallback",
+            )
+            if not retryable:
+                break
+        except (URLError, TimeoutError, ValueError, TypeError, KeyError, IndexError) as exc:
+            log.warning(
+                "DeepSeek CI greeting attempt %d/%d failed: %s%s",
+                attempt,
+                DEEPSEEK_MAX_ATTEMPTS,
+                type(exc).__name__,
+                "; retrying" if attempt < DEEPSEEK_MAX_ATTEMPTS else "; using fallback",
+            )
+        except Exception as exc:  # Keep notification alive for unexpected client failures.
+            log.warning(
+                "DeepSeek CI greeting attempt %d/%d failed: %s%s",
+                attempt,
+                DEEPSEEK_MAX_ATTEMPTS,
+                type(exc).__name__,
+                "; retrying" if attempt < DEEPSEEK_MAX_ATTEMPTS else "; using fallback",
+            )
+        if attempt < DEEPSEEK_MAX_ATTEMPTS:
+            time.sleep(DEEPSEEK_RETRY_DELAYS[attempt - 1])
+    log.warning("DeepSeek CI greeting unavailable; using fallback")
+    return fallback
 
 
 def _ci_display_title(payload: dict[str, Any], run: dict[str, Any]) -> str:

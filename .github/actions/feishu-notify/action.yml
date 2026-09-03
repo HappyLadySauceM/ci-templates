@@ -17,7 +17,7 @@ inputs:
     required: false
     default: ""
   deepseek-api-key:
-    description: Optional DeepSeek key for CI card greetings
+    description: DeepSeek key for CI card greetings; a deterministic fallback is used when unavailable
     required: false
     default: ""
   release-tag:

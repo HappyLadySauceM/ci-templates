@@ -89,7 +89,7 @@ Helm/YAML 里的 CPU 必须写成带引号的字符串（`"2"`、`"4"`），否�
 
 | 池 | Namespace | min / max | 每 Pod 资源 | namespace 配额 |
 | --- | --- | --- | --- | --- |
-| `hls-standard` | `arc-runners-standard` | 1 / 8 | request 2 CPU / 1Gi，limit 4 CPU / 4Gi | 32 CPU / 32Gi（pods 上限 12） |
+| `hls-standard` | `arc-runners-standard` | 1 / 8 | request 2 CPU / 4Gi，limit 4 CPU / 8Gi | 32 CPU / 64Gi（pods 上限 12） |
 | `hls-builder` | `arc-runners-builder` | 0 / 8 | DinD request `"2"` / 1Gi、limit `"4"` / 4Gi；runner 同样 CPU，内存 512Mi / 1Gi；init `500m` / `256Mi`。8 个 limit 合计 68 CPU / 42Gi | 68 CPU / 42Gi（pods 上限 10；request 仍 64/40Gi） |
 | controller | `arc-system` | 2 replica | 见 controller values |  |
 
@@ -98,8 +98,11 @@ builder 允许 10 个，是为了滚动重叠；Scale Set 实际最多 8 个 run
 
 `request` 只给 kube-scheduler 和 ResourceQuota 做加法，不是 JVM `-Xms` 那种预留。
 `limit` 是 cgroup 天花板（`cpu.max` / `memory.max`）。8 个 standard 加 8 个
-builder 的 request 约 48 CPU / 20Gi，可以同时调度到约 80 CPU / 64Gi 的节点；
-limit 合计超过节点容量，真打满会 CPU 节流或 kubelet 驱逐（QoS Burstable）。
+builder 的 request 约 52 CPU / 46Gi，可以调度到约 80 CPU / 64Gi 的节点，但还要
+扣除平台 Pod 已使用的资源；limit 合计约 100 CPU / 106Gi，真打满会 CPU 节流、
+内存压力或 kubelet 驱逐（QoS Burstable）。standard 单节点同时承载 8 个 runner
+时必须监控 `MemoryPressure`、`MemAvailable` 和 `OOMKilled`，必要时先降低
+`maxRunners`。
 builder 每 Pod 应用容器 limit 仍是 8 CPU / 5Gi；init 必须再带 `500m` /
 `256Mi` limit（namespace 写了 `limits.*` 时 Kubernetes 要求每个容器都写
 limit，否则 Pod 会被 ResourceQuota 拒绝）。因此 limit 配额是 68 CPU /
