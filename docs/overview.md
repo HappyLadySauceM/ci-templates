@@ -26,7 +26,7 @@ ci-templates 是组织的 CI/CD 控制面；应用仓库只保留薄 workflow �
 ## ARC 运行池
 
 组织 self-hosted runner 由 ARC Scale Set 提供，叙事真源见 [ARC 实现](arc.md)。
-当前 `maxRunners`：`hls-standard` 8（request 2 CPU / 4Gi，limit 4 CPU / 8Gi），
+当前 `maxRunners`：`hls-standard` 8（request 4 CPU / 4Gi，limit 8 CPU / 8Gi），
 `hls-builder` 8（DinD `"4"` / 4Gi + runner `"4"` / 1Gi + init `500m` /
 `256Mi`，CPU/内存 limit 配额 68/42Gi，request 仍 64/40Gi）。两个池调度到
 `workload.happyladysauce.local/ci=true`；standard 不挂宿主机 socket，builder

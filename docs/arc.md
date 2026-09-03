@@ -89,7 +89,7 @@ Helm/YAML 里的 CPU 必须写成带引号的字符串（`"2"`、`"4"`），否�
 
 | 池 | Namespace | min / max | 每 Pod 资源 | namespace 配额 |
 | --- | --- | --- | --- | --- |
-| `hls-standard` | `arc-runners-standard` | 1 / 8 | request 2 CPU / 4Gi，limit 4 CPU / 8Gi | 32 CPU / 64Gi（pods 上限 12） |
+| `hls-standard` | `arc-runners-standard` | 1 / 8 | request 4 CPU / 4Gi，limit 8 CPU / 8Gi | request 32 CPU / 32Gi、limit 64 CPU / 64Gi（pods 上限 12） |
 | `hls-builder` | `arc-runners-builder` | 0 / 8 | DinD request `"2"` / 1Gi、limit `"4"` / 4Gi；runner 同样 CPU，内存 512Mi / 1Gi；init `500m` / `256Mi`。8 个 limit 合计 68 CPU / 42Gi | 68 CPU / 42Gi（pods 上限 10；request 仍 64/40Gi） |
 | controller | `arc-system` | 2 replica | 见 controller values |  |
 
@@ -135,9 +135,9 @@ Harbor registry `buildcache` 是 builder 上 BuildKit 的另一套缓存，不�
 hostPath 里。
 
 `ci-templates` 的 `build_jobs()` 读的是 **runner 容器** 的 cgroup
-（`cpu.max` / 亲和性），默认取可见 CPU 的 75%。DinD 与 runner 的 CPU
-request/limit **彼此必须相同**，否则 BuildKit `max-parallelism` 会按较小的
-runner cgroup 算。当前两边 limit 都是 `"4"`，所以 `BUILD_JOBS`≈3。
+（`cpu.max` / 亲和性），默认取可见 CPU 的 75%。Knowledge-Core 显式设置
+`BUILD_CPU_PERCENT=100`；standard runner 因此最多使用 8 个构建槽。Builder
+runner 与 DinD 的 limit 都是 `"4"`，所以 BuildKit 最多使用 4 个槽。
 `BUILD_JOBS` 紧急覆盖仍受 runner 可见核数限制。request 可以低于 limit（给
 调度超卖），`cpu.max` 仍是 limit。
 
@@ -195,9 +195,10 @@ runner cgroup 算。当前两边 limit 都是 `"4"`，所以 `BUILD_JOBS`≈3。
 
 ```text
 plan                    hls-standard
-  ├─ go/rust/web 门禁   hls-standard   → GitHub Artifacts（含隐藏 .ci-artifacts）
-  ├─ prewarm            hls-builder    needs: [plan]，与门禁并行
-  ├─ package-candidates hls-builder    max-parallel: 8
+  ├─ go/rust/web 门禁   hls-standard   → 每服务 GitHub Artifact
+  ├─ prewarm            hls-builder    needs: [plan]，bootstrap BuildKit 后预热
+  ├─ package-go-candidates   hls-builder（不等待 Rust）
+  ├─ package-rust-candidates hls-builder
   └─ release-notes      hls-standard
 deploy-release          hls-standard   promote-snapshot → argo-wait → smoke
 cleanup-candidates      hls-standard
@@ -205,8 +206,8 @@ cleanup-candidates      hls-standard
 
 要点：
 
-- `package-candidates` 的 `max-parallel` 必须是 **8**，与 `hls-builder`
-  `maxRunners: 8` 对齐。
+- Go candidate 最大并发为 5、Rust 为 1；合计不超过 `hls-builder`
+  `maxRunners: 8`，并且每个 job 只下载自己的二进制。
 - 计划、编译产物、candidate digest、release 摘要走 GitHub Artifacts，不写
   宿主机路径。
 - 无 Docker 的活放 `hls-standard`；只有需要 dockerd / buildx 的步骤放

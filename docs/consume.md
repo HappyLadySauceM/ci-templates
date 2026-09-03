@@ -32,8 +32,8 @@ GitHub environment secrets 或集群 Secret。
 ```text
 push dev
   → plan: validate + changes + release context
-      ├─ standard: Go/Rust/Node 质量门禁并上传 GitHub Artifacts
-      ├─ builder: prewarm + service matrix 构建不可变 candidate
+      ├─ standard: Go/Rust/Node 质量门禁并按服务上传 GitHub Artifacts
+      ├─ builder: prewarm（先 bootstrap BuildKit）+ Go/Rust 独立 candidate matrix
       └─ standard: release-notes
   → standard deploy-release:
         promote-snapshot(CAS retry) → apply ApplicationSet
@@ -68,7 +68,7 @@ push dev
 
 | Runner / Secret | 用途 |
 | --- | --- |
-| `hls-standard`（最多 8，request 2 CPU / 4Gi，limit 4 CPU / 8Gi） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup、飞书通知 |
+| `hls-standard`（最多 8，request 4 CPU / 4Gi，limit 8 CPU / 8Gi） | plan、质量门禁、release notes、GitOps、Argo、smoke、cleanup；飞书任务同步改跑 `ubuntu-latest` |
 | `hls-builder`（最多 8，DinD 4 CPU / 4Gi + runner 4 CPU / 1Gi + init 500m / 256Mi；request 更低） | BuildKit / Docker-in-Docker、base image prewarm、service matrix |
 | `arc-github-app` | ARC 在每个 runner namespace 注册 ephemeral runner |
 | `HARBOR_DOCKER_CONFIG_JSON`、`HARBOR_CA_PEM` | Harbor pull/push 与 TLS |
@@ -79,7 +79,7 @@ push dev
 | `CI_PROJECT_CONFIG` | `.ci/pipeline.yaml` 配置路径 |
 | `CI_GITOPS_IMAGE_OVERRIDES_JSON` | promote-snapshot / argo-wait 的 digest |
 | `CI_RELEASE_CHANGES_FILE` | 未传 `--changes-file` 时的 release 上下文 |
-| `BUILD_CPU_PERCENT` | 构建并行比例，默认 75 |
+| `BUILD_CPU_PERCENT` | 构建并行比例；Knowledge-Core 使用 100，CLI 默认 75 |
 | `CI_BUILDER_NAME` | 可选的 Buildx builder 名；默认 `ci-templates`，不同名称使用独立状态 |
 | `BUILDKIT_IMAGE` | `docker-container` driver 使用的 BuildKit 镜像；ARC builder 固定到 Harbor digest |
 | `CI_REGISTRY_CA_FILE` | 可选的 Harbor CA 文件；内容指纹变化会触发 builder 重建 |
@@ -112,7 +112,8 @@ BuildKit cache。需要在同一 Docker daemon 上隔离不同流水线时，可
 `BUILDKIT_IMAGE` 控制 `docker-container` driver 的 BuildKit 镜像；
 `hls-builder` 使用 Harbor `knowledge-core/buildkit` 中与
 `moby/buildkit:buildx-stable-1` 相同 digest 的
-内部镜像，避免构建启动时访问 Docker Hub。创建 builder 前会显式预拉取该镜像，
+内部镜像，避免构建启动时访问 Docker Hub。`ci-templates builder-check` 会显式
+预拉取、创建并 bootstrap builder；`prewarm` 在 matrix fan-out 前执行该检查，
 让 DinD daemon 使用 workflow 准备好的 Harbor 凭据。
 设置 `CI_REGISTRY_CA_FILE` 时，marker 只保存 CA 文件的 SHA-256 指纹；CA 内容
 变化会受控重建 builder，不会写入 marker。
