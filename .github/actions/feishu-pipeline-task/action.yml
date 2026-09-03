@@ -38,7 +38,7 @@ inputs:
     required: false
     default: ""
   phase:
-    description: Inline sync phase: in_progress or completed; omit for workflow_run events
+    description: "Inline sync phase: in_progress or completed; omit for workflow_run events"
     required: false
     default: ""
   conclusion:
