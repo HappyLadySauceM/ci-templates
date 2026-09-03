@@ -27,6 +27,7 @@ from ci_templates.charts import Chart, ChartError, _extract_chart, _relative_pat
 from ci_templates.build import (
     BuildError,
     _builder_state_path,
+    _configured_buildkit_image,
     _configured_builder_name,
     _docker,
     _ensure_builder,
@@ -776,6 +777,21 @@ class CiTemplatesTest(unittest.TestCase):
                 with self.assertRaisesRegex(BuildError, "CI_BUILDER_NAME"):
                     _configured_builder_name()
 
+    def test_buildkit_image_defaults_and_rejects_unsafe_values(self):
+        with patch.dict("ci_templates.build.os.environ", {}, clear=True):
+            self.assertEqual(_configured_buildkit_image(), "moby/buildkit:buildx-stable-1")
+
+        configured = "harbor.example/infrastructure/buildkit:stable@sha256:" + "a" * 64
+        with patch.dict("ci_templates.build.os.environ", {"BUILDKIT_IMAGE": configured}, clear=True):
+            self.assertEqual(_configured_buildkit_image(), configured)
+
+        for value in ("", "buildkit image", "/tmp/buildkit", "--help"):
+            with self.subTest(value=value), patch.dict(
+                "ci_templates.build.os.environ", {"BUILDKIT_IMAGE": value}, clear=True
+            ):
+                with self.assertRaisesRegex(BuildError, "BUILDKIT_IMAGE"):
+                    _configured_buildkit_image()
+
     def test_builder_state_paths_are_isolated_but_default_path_is_compatible(self):
         import tempfile
 
@@ -817,6 +833,7 @@ class CiTemplatesTest(unittest.TestCase):
                 self.assertEqual(marker["builder"], "kapok-ci")
                 self.assertEqual(marker["registry"], "org")
                 self.assertEqual(marker["registry_ca_sha256"], _registry_ca_fingerprint(str(ca_path)))
+                self.assertEqual(marker["buildkit_image"], "moby/buildkit:buildx-stable-1")
                 marker_text = marker_path.read_text(encoding="utf-8")
                 self.assertNotIn(str(ca_path), marker_text)
                 self.assertNotIn("first CA", marker_text)
@@ -916,6 +933,7 @@ class CiTemplatesTest(unittest.TestCase):
     def test_build_configures_private_registry_ca(self, docker):
         import tempfile
         observed = []
+        observed_create_args = []
 
         def run(args, **_kwargs):
             if args[:2] == ["buildx", "inspect"]:
@@ -923,16 +941,19 @@ class CiTemplatesTest(unittest.TestCase):
             if args[:2] == ["buildx", "create"]:
                 config_path = Path(args[args.index("--buildkitd-config") + 1])
                 observed.append(config_path.read_text(encoding="utf-8"))
+                observed_create_args.append(args)
             return subprocess.CompletedProcess([], 1 if args[0] == "pull" else 0)
 
         docker.side_effect = run
         with tempfile.TemporaryDirectory() as directory:
             ca_path = Path(directory) / "registry-ca.crt"
             ca_path.write_text("test CA\n", encoding="utf-8")
-            with patch.dict("os.environ", {"CI_REGISTRY_CA_FILE": str(ca_path)}):
+            buildkit_image = "harbor.example/infrastructure/buildkit:stable@sha256:" + "b" * 64
+            with patch.dict("os.environ", {"CI_REGISTRY_CA_FILE": str(ca_path), "BUILDKIT_IMAGE": buildkit_image}):
                 build_service(config().services[0])
 
         self.assertEqual(len(observed), 1)
+        self.assertEqual(observed_create_args[0][observed_create_args[0].index("--driver-opt") + 1], f"image={buildkit_image}")
         self.assertIn("[worker.oci]", observed[0])
         self.assertIn(f"max-parallelism = {build_jobs()}", observed[0])
         self.assertIn(f'[registry."org"]\n  ca = ["{ca_path}"]\n', observed[0])

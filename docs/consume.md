@@ -81,6 +81,7 @@ push dev
 | `CI_RELEASE_CHANGES_FILE` | 未传 `--changes-file` 时的 release 上下文 |
 | `BUILD_CPU_PERCENT` | 构建并行比例，默认 75 |
 | `CI_BUILDER_NAME` | 可选的 Buildx builder 名；默认 `ci-templates`，不同名称使用独立状态 |
+| `BUILDKIT_IMAGE` | `docker-container` driver 使用的 BuildKit 镜像；ARC builder 固定到 Harbor digest |
 | `CI_REGISTRY_CA_FILE` | 可选的 Harbor CA 文件；内容指纹变化会触发 builder 重建 |
 | `FEISHU_WEBHOOK_URL` | 组织 Actions secret：飞书自定义机器人 webhook |
 | `FEISHU_WEBHOOK_SECRET` | 组织 Actions secret：飞书自定义机器人签名密钥 |
@@ -108,6 +109,9 @@ Buildx builder 默认名为 `ci-templates`，用于在同一 runner 上跨服务
 BuildKit cache。需要在同一 Docker daemon 上隔离不同流水线时，可通过
 `CI_BUILDER_NAME` 指定 1–63 个字符的安全名称（仅字母、数字、`.`, `_`, `-`）；
 每个名称使用独立的资源 marker。未设置时保持历史 marker 路径不变。
+`BUILDKIT_IMAGE` 控制 `docker-container` driver 的 BuildKit 镜像；
+`hls-builder` 使用 Harbor 中与 `moby/buildkit:buildx-stable-1` 相同 digest 的
+内部镜像，避免构建启动时访问 Docker Hub。
 设置 `CI_REGISTRY_CA_FILE` 时，marker 只保存 CA 文件的 SHA-256 指纹；CA 内容
 变化会受控重建 builder，不会写入 marker。
 

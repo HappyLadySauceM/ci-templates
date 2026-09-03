@@ -20,10 +20,12 @@ class BuildError(RuntimeError):
 
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 DEFAULT_BUILDER_NAME = "ci-templates"
+DEFAULT_BUILDKIT_IMAGE = "moby/buildkit:buildx-stable-1"
 # Buildx names are also used as Docker object names and as marker filenames.
 # Keep the accepted alphabet deliberately narrow so an environment variable
 # cannot escape the marker directory or alter the command shape.
 _BUILDER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
+_BUILDKIT_IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@:-]{0,254}\Z")
 STABLE_BUILDER = DEFAULT_BUILDER_NAME
 DEFAULT_CPU_PERCENT = 75
 _BUILDER_STATE_FILE = "ci-templates-resource.json"
@@ -117,6 +119,13 @@ def _configured_builder_name() -> str:
     return _validated_builder_name(value)
 
 
+def _configured_buildkit_image() -> str:
+    value = os.environ.get("BUILDKIT_IMAGE", DEFAULT_BUILDKIT_IMAGE).strip()
+    if not _BUILDKIT_IMAGE_RE.fullmatch(value):
+        raise BuildError("BUILDKIT_IMAGE must contain a valid image reference")
+    return value
+
+
 def _builder_state_path(builder_name: str | None = None) -> Path:
     name = _configured_builder_name() if builder_name is None else _validated_builder_name(builder_name)
     # Keep the historical default marker path so existing runners reuse their
@@ -134,8 +143,10 @@ def _builder_matches(
     *,
     builder_name: str | None = None,
     registry_ca_fingerprint: str | None = None,
+    buildkit_image: str | None = None,
 ) -> bool:
     name = _configured_builder_name() if builder_name is None else _validated_builder_name(builder_name)
+    image = _configured_buildkit_image() if buildkit_image is None else buildkit_image
     try:
         state = json.loads(_builder_state_path(name).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -145,6 +156,7 @@ def _builder_matches(
         "jobs": jobs,
         "registry": registry,
         "registry_ca_sha256": registry_ca_fingerprint,
+        "buildkit_image": image,
     }
 
 
@@ -154,8 +166,10 @@ def _write_builder_state(
     *,
     builder_name: str | None = None,
     registry_ca_fingerprint: str | None = None,
+    buildkit_image: str | None = None,
 ) -> None:
     name = _configured_builder_name() if builder_name is None else _validated_builder_name(builder_name)
+    image = _configured_buildkit_image() if buildkit_image is None else buildkit_image
     path = _builder_state_path(name)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +180,7 @@ def _write_builder_state(
                     "jobs": jobs,
                     "registry": registry,
                     "registry_ca_sha256": registry_ca_fingerprint,
+                    "buildkit_image": image,
                 }
             )
             + "\n",
@@ -236,6 +251,7 @@ def _ensure_builder(
     min_free_space: str | None = None,
 ) -> str:
     name = _configured_builder_name()
+    buildkit_image = _configured_buildkit_image()
     registry = service.image_repository.split("/", 1)[0]
     registry_ca = os.environ.get("CI_REGISTRY_CA_FILE", "").strip() or None
     registry_ca_fingerprint = _registry_ca_fingerprint(registry_ca)
@@ -245,6 +261,7 @@ def _ensure_builder(
         registry,
         builder_name=name,
         registry_ca_fingerprint=registry_ca_fingerprint,
+        buildkit_image=buildkit_image,
     ):
         return name
 
@@ -256,6 +273,7 @@ def _ensure_builder(
     # private registry names resolve on the host but not inside BuildKit.
     create_args = [
         "buildx", "create", "--driver", "docker-container",
+        "--driver-opt", f"image={buildkit_image}",
         "--driver-opt", f"network={os.environ.get('BUILDKIT_NETWORK', 'host')}", "--name", name,
     ]
     buildkit_config: tempfile.TemporaryDirectory[str] | None = None
@@ -280,6 +298,7 @@ def _ensure_builder(
             registry,
             builder_name=name,
             registry_ca_fingerprint=registry_ca_fingerprint,
+            buildkit_image=buildkit_image,
         )
     except Exception:
         _docker(["buildx", "rm", "--force", name], cwd=cwd, check=False)
