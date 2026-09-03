@@ -168,6 +168,9 @@ runner 与 DinD 的 limit 都是 `"4"`，所以 BuildKit 最多使用 4 个槽�
   Buildx 冷启动访问 Docker Hub。创建 `docker-container` builder 前，CLI 会先用
   runner 的 Harbor `DOCKER_CONFIG` 显式拉取该镜像，避免 DinD daemon 因未携带
   runner 凭据而收到 `unauthorized`。
+- Runner 的日常控制面更新以 Harbor 中不可变的上一版 runner 为基础，只安装新的
+  `ci-templates` Python 包；不会重新从 Docker Hub、GitHub、Kubernetes 或 Helm
+  下载工具链。升级 Actions Runner 或基础工具链时另行构建、审核 bootstrap 基础镜像。
 - 控制镜像 `knowledge-core/ci-templates:vVERSION` 仍会发布，供本仓库测试或非
   ARC 场景；**接在 ARC 上的应用 workflow 直接调用 runner 里的 CLI**，不要再
   `docker run` 控制镜像。

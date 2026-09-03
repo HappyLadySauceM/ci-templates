@@ -55,7 +55,7 @@ template:
         type: RuntimeDefault
     containers:
       - name: runner
-        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0-r6
+        image: harbor.happyladysauce.local/infrastructure/hls-actions-runner:2.337.0-r7
         imagePullPolicy: IfNotPresent
         command: ["/home/runner/run.sh"]
         resources:

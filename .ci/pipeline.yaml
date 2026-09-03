@@ -23,7 +23,7 @@ harbor_project: infrastructure
 control_image_repository: harbor.happyladysauce.local/knowledge-core/ci-templates
 runner_image_repository: harbor.happyladysauce.local/infrastructure/hls-actions-runner
 runner_version: 2.337.0
-runner_image_tag: 2.337.0-r6
+runner_image_tag: 2.337.0-r7
 argocd_server: argocd.happyladysauce.local
 argocd_namespace: argocd
 smoke_command: []
