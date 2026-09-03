@@ -125,7 +125,7 @@ template:
           # moby/buildkit:buildx-stable-1; keep the digest immutable.
           # Buildx docker-container driver 使用 Harbor 内部镜像，固定 digest。
           - name: BUILDKIT_IMAGE
-            value: harbor.happyladysauce.local/infrastructure/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+            value: harbor.happyladysauce.local/knowledge-core/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
           - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
             value: "120"
           # Same node-local caches as hls-standard.

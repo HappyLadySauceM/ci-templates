@@ -163,7 +163,7 @@ runner cgroup 算。当前两边 limit 都是 `"4"`，所以 `BUILD_JOBS`≈3。
 - controller：digest pin 的
   `harbor.happyladysauce.local/infrastructure/gha-runner-scale-set-controller`。
 - BuildKit：`hls-builder` 的 `BUILDKIT_IMAGE` 固定为
-  `harbor.happyladysauce.local/infrastructure/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8`；
+  `harbor.happyladysauce.local/knowledge-core/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8`；
   该多架构镜像与 upstream `moby/buildkit:buildx-stable-1` digest 一致，避免
   Buildx 冷启动访问 Docker Hub。创建 `docker-container` builder 前，CLI 会先用
   runner 的 Harbor `DOCKER_CONFIG` 显式拉取该镜像，避免 DinD daemon 因未携带

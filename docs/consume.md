@@ -110,7 +110,8 @@ BuildKit cache。需要在同一 Docker daemon 上隔离不同流水线时，可
 `CI_BUILDER_NAME` 指定 1–63 个字符的安全名称（仅字母、数字、`.`, `_`, `-`）；
 每个名称使用独立的资源 marker。未设置时保持历史 marker 路径不变。
 `BUILDKIT_IMAGE` 控制 `docker-container` driver 的 BuildKit 镜像；
-`hls-builder` 使用 Harbor 中与 `moby/buildkit:buildx-stable-1` 相同 digest 的
+`hls-builder` 使用 Harbor `knowledge-core/buildkit` 中与
+`moby/buildkit:buildx-stable-1` 相同 digest 的
 内部镜像，避免构建启动时访问 Docker Hub。创建 builder 前会显式预拉取该镜像，
 让 DinD daemon 使用 workflow 准备好的 Harbor 凭据。
 设置 `CI_REGISTRY_CA_FILE` 时，marker 只保存 CA 文件的 SHA-256 指纹；CA 内容
