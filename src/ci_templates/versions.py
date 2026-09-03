@@ -59,6 +59,21 @@ def _list_tags(cwd: str, pattern: str, *, points_at_head: bool = False) -> list[
     return [line for line in result.stdout.splitlines() if line]
 
 
+def fetch_release_tags(cwd: str = ".") -> None:
+    """Fetch tags so a shallow checkout does not invent v0.1.1.
+
+    拉取远端 tag，避免浅克隆把下一个聚合版本算成 v0.1.1。
+    """
+
+    subprocess.run(
+        ["git", "fetch", "--tags", "--force"],
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _patch_numbers(tag_prefix: str, tags: list[str]) -> list[int]:
     patches = []
     for tag in tags:

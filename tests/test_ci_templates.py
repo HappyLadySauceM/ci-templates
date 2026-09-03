@@ -608,6 +608,59 @@ class CiTemplatesTest(unittest.TestCase):
     @patch("ci_templates.__main__.create_release")
     @patch("ci_templates.__main__.create_and_push_tag")
     @patch("ci_templates.__main__.fast_forward_main")
+    @patch("ci_templates.__main__.subprocess.run")
+    @patch("ci_templates.__main__.load_config")
+    def test_release_summary_file_strips_leading_version_heading(
+        self, load_config_mock, run, fast_forward, push_tag, create_release_mock
+    ):
+        load_config_mock.return_value = config()
+        run.return_value = subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n")
+
+        from ci_templates.__main__ import main
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            changes_file = Path(directory) / "changes.json"
+            summary_file = Path(directory) / "release.md"
+            changes_file.write_text(
+                json.dumps({
+                    "shared": {"paths": [], "diff": ""},
+                    "services": {"gateway": {"paths": ["services/gateway/a.go"], "diff": "+ feature"}},
+                }),
+                encoding="utf-8",
+            )
+            summary_file.write_text(
+                "# v0.1.1\n\n- 共享变更\n\n## Affected services\n\n- gateway\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.dict("ci_templates.__main__.os.environ", {}, clear=False),
+                patch("ci_templates.__main__.read_version", return_value=(0, 1, 0)),
+                patch("ci_templates.__main__.aggregate_release_tag", return_value="v0.1.27"),
+                patch("ci_templates.__main__.fetch_release_tags"),
+            ):
+                self.assertEqual(
+                    main([
+                        "release",
+                        "--services",
+                        "gateway",
+                        "--changes-file",
+                        str(changes_file),
+                        "--summary-file",
+                        str(summary_file),
+                    ]),
+                    0,
+                )
+
+        body = create_release_mock.call_args.args[3]
+        self.assertNotIn("v0.1.1", body)
+        self.assertIn("- 共享变更", body)
+        self.assertIn("## Affected services", body)
+
+    @patch("ci_templates.__main__.create_release")
+    @patch("ci_templates.__main__.create_and_push_tag")
+    @patch("ci_templates.__main__.fast_forward_main")
     @patch("ci_templates.__main__.summarize_with_deepseek", return_value="- shared summary")
     @patch("ci_templates.__main__.subprocess.run")
     @patch("ci_templates.__main__.load_config")

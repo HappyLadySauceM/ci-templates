@@ -25,8 +25,8 @@
 ### 上下文与模型
 
 1. 构建前：`changes --base <main-sha> --details-file changes.json`
-2. `summarize --changes-file changes.json --services ... --output release.md`：一次有界 DeepSeek 请求，正文文件权限 `0600`
-3. `release --changes-file changes.json --summary-file release.md`：不再请求模型
+2. `summarize --changes-file changes.json --services ... --output release.md`：一次有界 DeepSeek 请求，正文文件权限 `0600`。命令会 `git fetch --tags`，避免浅克隆把下一个 tag 算成 `v0.1.1`。
+3. `release --changes-file changes.json --summary-file release.md`：不再请求模型；读入时剥离正文开头的 `# vX.Y.Z`。
 
 `changes.json`、编译产物和 `release.md` 在 job 之间使用 GitHub Artifacts；不
 需要把状态目录或 Docker volume 挂到宿主机。

@@ -14,8 +14,8 @@ from .build import build_service, discard_previous, delete_previous, restore_pre
 from .argocd import wait_applications, wait_targets
 from .smoke import run as run_smoke, run_kubernetes
 from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
-from .release import render_aggregate_release, summarize_release_with_deepseek, summarize_with_deepseek
-from .versions import aggregate_release_tag, next_patch, read_version, service_tag
+from .release import render_aggregate_release, strip_release_version_heading, summarize_release_with_deepseek, summarize_with_deepseek
+from .versions import aggregate_release_tag, fetch_release_tags, next_patch, read_version, service_tag
 from .charts import ChartError, check_charts, format_result, mirror_charts
 from .harbor import HarborClient, ImageRef
 
@@ -274,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 raise ConfigError("no affected services or shared changes selected for summary")
             aggregate_version = read_version(Path(args.repo) / config.aggregate_version_file)
+            fetch_release_tags(cwd=args.repo)
             aggregate_tag = aggregate_release_tag(config.aggregate_release_prefix, aggregate_version, cwd=args.repo)
             body = summarize_release_with_deepseek(config.deepseek_model, aggregate_tag, context, deployed, config.release_language)
             destination = Path(args.output)
@@ -305,14 +306,16 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 raise ConfigError("no affected services or shared changes selected for release")
             aggregate_version = read_version(Path(args.repo) / config.aggregate_version_file)
+            fetch_release_tags(cwd=args.repo)
             aggregate_tag = aggregate_release_tag(config.aggregate_release_prefix, aggregate_version, cwd=args.repo)
             if args.summary_file:
                 try:
-                    release_body = Path(args.summary_file).read_text(encoding="utf-8")
+                    release_body = strip_release_version_heading(Path(args.summary_file).read_text(encoding="utf-8"))
                 except OSError as exc:
                     raise ConfigError(f"cannot read release summary: {exc}") from exc
                 if not release_body.strip():
                     raise ConfigError("release summary is empty")
+                release_body = release_body.rstrip() + "\n"
             else:
                 shared_changes = context.get("shared")
                 shared_summary = ""
