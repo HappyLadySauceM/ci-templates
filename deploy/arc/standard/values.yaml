@@ -76,6 +76,13 @@ template:
             value: /cache/go/build
           - name: NPM_CONFIG_CACHE
             value: /cache/npm
+          # pnpm's package store is separate from npm's metadata cache. Keep
+          # the content-addressed store on the node so ephemeral runners only
+          # download a package once.
+          # pnpm 包存储与 npm 元数据缓存彼此独立。将内容寻址 store 放在节点上，
+          # ephemeral runner 对同一包只下载一次。
+          - name: NPM_CONFIG_STORE_DIR
+            value: /cache/pnpm/store
           - name: PLAYWRIGHT_BROWSERS_PATH
             value: /cache/playwright
           - name: RUNNER_TOOL_CACHE

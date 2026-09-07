@@ -138,6 +138,8 @@ template:
             value: /cache/go/build
           - name: NPM_CONFIG_CACHE
             value: /cache/npm
+          - name: NPM_CONFIG_STORE_DIR
+            value: /cache/pnpm/store
           - name: PLAYWRIGHT_BROWSERS_PATH
             value: /cache/playwright
           - name: RUNNER_TOOL_CACHE

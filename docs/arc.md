@@ -128,8 +128,13 @@ DinD。
 | `GOMODCACHE` | `/cache/go/mod` |
 | `GOCACHE` | `/cache/go/build` |
 | `NPM_CONFIG_CACHE` | `/cache/npm` |
+| `NPM_CONFIG_STORE_DIR` | `/cache/pnpm/store` |
 | `PLAYWRIGHT_BROWSERS_PATH` | `/cache/playwright` |
 | `RUNNER_TOOL_CACHE` | `/cache/actions-tools` |
+
+`NPM_CONFIG_CACHE` 只保存 npm/corepack 元数据，不能复用 `pnpm install` 下载的包；
+`NPM_CONFIG_STORE_DIR` 才是 pnpm 的内容寻址包存储。该 store 支持多个同 uid 的
+ephemeral runner 并发复用，项目中的 `node_modules` 仍留在各自工作目录，不跨任务共享。
 
 Harbor registry `buildcache` 是 builder 上 BuildKit 的另一套缓存，不在这个
 hostPath 里。
