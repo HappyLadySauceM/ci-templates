@@ -42,7 +42,9 @@ from ci_templates.argocd import (
     ArgoError,
     _has_revision,
     _observed_revisions,
+    _pod_failures,
     _ready_state,
+    terminate_operations,
     wait_application,
     wait_applications,
     wait_targets,
@@ -108,6 +110,24 @@ class CiTemplatesTest(unittest.TestCase):
     def test_runner_image_tag_defaults_to_runner_version(self):
         pipeline = config()
         self.assertEqual(pipeline.runner_image_tag, pipeline.runner_version)
+        self.assertEqual(pipeline.argocd_wait_timeout_seconds, 600)
+
+    def test_argocd_wait_timeout_is_bounded(self):
+        value = {
+            "project": "example",
+            "source_repo": "org/example",
+            "gitops_repo": "org/gitops",
+            "gitops_path": "Example",
+            "gitops_branch": "main",
+            "argocd_wait_timeout_seconds": 29,
+            "services": [{
+                "name": "gateway", "source_path": "services/gateway", "version_file": "services/gateway/VERSION",
+                "dockerfile": "services/gateway/Dockerfile", "context": ".", "image_repository": "org/gateway",
+                "deploy_snapshot": "deploy/gateway",
+            }],
+        }
+        with self.assertRaises(ConfigError):
+            Pipeline.from_mapping(value)
 
     def test_runner_image_tag_can_version_image_independently(self):
         value = {
@@ -391,6 +411,120 @@ class CiTemplatesTest(unittest.TestCase):
             any("argocd.argoproj.io/refresh=hard" in command for command in commands),
             commands,
         )
+
+    @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
+    @patch("ci_templates.argocd.time.sleep", return_value=None)
+    @patch("ci_templates.argocd.subprocess.run")
+    def test_argo_wait_stops_refreshing_after_revision_is_observed(self, run, _sleep):
+        desired = "a" * 40
+        progressing = json.dumps({
+            "status": {
+                "sync": {"revision": desired, "status": "Synced"},
+                "health": {"status": "Progressing"},
+            }
+        })
+        healthy = json.dumps({
+            "status": {
+                "sync": {"revision": desired, "status": "Synced"},
+                "health": {"status": "Healthy"},
+            }
+        })
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, progressing, ""),
+            subprocess.CompletedProcess([], 0, healthy, ""),
+        ]
+
+        wait_application("argocd.example.invalid", "knowledge-core-gateway-dev", desired, timeout=30)
+
+        annotate = [item for item in run.call_args_list if "annotate" in item.args[0]]
+        self.assertEqual(len(annotate), 1)
+
+    @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
+    @patch("ci_templates.argocd.subprocess.run")
+    def test_argo_wait_fails_fast_on_failed_operation(self, run):
+        payload = json.dumps({
+            "status": {
+                "sync": {"revision": "a" * 40, "status": "OutOfSync"},
+                "health": {"status": "Progressing"},
+                "operationState": {"phase": "Failed", "message": "hook failed"},
+                "resources": [{
+                    "group": "apps",
+                    "kind": "StatefulSet",
+                    "name": "knowledge-core-collaboration",
+                    "status": "OutOfSync",
+                    "health": {"status": "Progressing"},
+                    "requiresPruning": True,
+                }],
+            }
+        })
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, payload, ""),
+        ]
+
+        with self.assertRaises(ArgoError) as raised:
+            wait_application("argocd.example.invalid", "knowledge-core-collaboration-dev", "a" * 40)
+
+        message = str(raised.exception)
+        self.assertIn("failed fast", message)
+        self.assertIn("hook failed", message)
+        self.assertIn("requiresPruning", message)
+        self.assertEqual(run.call_count, 2)
+
+    @patch("ci_templates.argocd.subprocess.run")
+    def test_pod_failures_are_resolved_from_tracked_workload(self, run):
+        workload = {"spec": {"selector": {"matchLabels": {"app": "collaboration"}}}}
+        pods = {
+            "items": [{
+                "metadata": {"name": "collaboration-1"},
+                "status": {"containerStatuses": [{
+                    "name": "collaboration",
+                    "restartCount": 7,
+                    "state": {"waiting": {"reason": "CrashLoopBackOff", "message": "decode failed"}},
+                }]},
+            }]
+        }
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, json.dumps(workload), ""),
+            subprocess.CompletedProcess([], 0, json.dumps(pods), ""),
+        ]
+        payload = {
+            "spec": {"destination": {"namespace": "knowledge-core-dev"}},
+            "status": {"resources": [{
+                "group": "apps",
+                "kind": "StatefulSet",
+                "name": "knowledge-core-collaboration",
+                "namespace": "knowledge-core-dev",
+            }]},
+        }
+
+        failures = _pod_failures("/secrets/kubeconfig", payload)
+
+        self.assertEqual(failures[0]["pod"], "collaboration-1")
+        self.assertEqual(failures[0]["reason"], "CrashLoopBackOff")
+
+    @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
+    @patch("ci_templates.argocd.time.sleep", return_value=None)
+    @patch("ci_templates.argocd.subprocess.run")
+    def test_argo_terminate_removes_active_operation(self, run, _sleep):
+        active = json.dumps({"operation": {"sync": {"revision": "a" * 40}}})
+        idle = json.dumps({})
+
+        def command_result(command, **_kwargs):
+            if "patch" in command:
+                return subprocess.CompletedProcess(command, 0, "patched", "")
+            if "get" in command:
+                output = active if sum("get" in item.args[0] for item in run.call_args_list) == 1 else idle
+                return subprocess.CompletedProcess(command, 0, output, "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        run.side_effect = command_result
+        terminate_operations("/secrets/kubeconfig", ("knowledge-core-collaboration-dev",))
+
+        patches = [item.args[0] for item in run.call_args_list if "patch" in item.args[0]]
+        self.assertEqual(len(patches), 1)
+        self.assertIn('{"operation":null}', patches[0])
 
     @patch.dict("ci_templates.argocd.os.environ", {"KUBECONFIG": "/secrets/kubeconfig"}, clear=False)
     @patch("ci_templates.argocd.time.sleep", return_value=None)

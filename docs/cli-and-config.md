@@ -18,7 +18,8 @@
 | `cleanup-candidate` | `--service`、`--tag` | 删除 Harbor 候选 tag |
 | `cleanup-previous` | `--service` | 确认后删除 Harbor `:previous` |
 | `restore-previous` | `--service` | 从 `:previous` 恢复 `:dev` |
-| `argo-wait` | `--revision`、`--services`（逗号分隔） | 等待 Application Synced + Healthy，并可匹配期望 digest |
+| `argo-wait` | `--revision`、`--services`（逗号分隔）、`--timeout` | 等待 Application Synced + Healthy，并可匹配期望 digest；明确失败时 fail-fast 并打印诊断 |
+| `argo-terminate` | `--services`（逗号分隔）、`--timeout` | 清理指定 Application 的进行中 operation，供 GitOps 回滚前使用 |
 | `smoke` | `--repo` | 配置了 `smoke_endpoints` 且有 `KUBECONFIG` 时跑 API proxy 检查，否则执行 `smoke_command` |
 | `summarize` | `--services`、`--changes-file`、`--output` | 一次 DeepSeek 请求，写出权限 `0600` 的正文文件 |
 | `release` | `--services`、`--changes-file`、`--summary-file` | fast-forward `main`、打聚合 tag、创建 GitHub Release |
@@ -39,7 +40,9 @@
 
 只改 Dockerfile、没有业务路径时，变更归入 Shared bucket，不单独开服务章节。
 
-`argo-wait`：传入 `--services` 时等待各服务的 `{kustomize_name}-dev`，并用 `CI_GITOPS_IMAGE_OVERRIDES_JSON` 对齐 digest；未传服务时回退到配置里的单个 `argocd_application`。需要 `argocd_server`。
+`argo-wait`：传入 `--services` 时等待各服务的 `{kustomize_name}-dev`，并用 `CI_GITOPS_IMAGE_OVERRIDES_JSON` 对齐 digest；未传服务时回退到配置里的单个 `argocd_application`。发现失败 operation、Degraded 资源或持续的 Pod 启动错误时会立即失败并打印资源、Pod 与最近日志。目标 revision/digest 一旦被观察到，后续轮询不再 hard refresh。需要 `argocd_server`。
+
+`argo-terminate` 需要 `KUBECONFIG`，只清理 Application 根级 operation，不直接修改工作负载；通常应在 `rollback-snapshot` 之前运行。
 
 `smoke`：存在 `KUBECONFIG` 且配置了 `smoke_endpoints` 时，对配置的 namespace 做 API proxy readiness 检查；否则把 `smoke_env` 注入后执行 `smoke_command`。
 
@@ -74,6 +77,7 @@
 | `schema_version` | 否 | `1` | v2 启用项目 slug 默认值与显式 smoke/runner 配置 |
 | `argocd_namespace` | 否 | `argocd` | Argo CD API namespace |
 | `application_suffix` | 否 | `-dev` | 服务 kustomize 名到 Application 名的后缀 |
+| `argocd_wait_timeout_seconds` | 否 | `600` | `argo-wait` 默认超时，范围 `30..3600` 秒 |
 | `smoke_namespace` / `smoke_endpoints` | 否 | 空 | 集群 smoke 的 namespace 与 `{service,port,path}` 列表 |
 | `smoke_env` | 否 | `{}` | 无 kubeconfig smoke 命令的环境变量映射 |
 | `active_image_tag` / `previous_image_tag` / `cache_image_tag` | 否 | `dev` / `previous` / `buildcache` | 镜像生命周期与 BuildKit cache 标签 |

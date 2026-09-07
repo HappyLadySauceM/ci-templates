@@ -16,6 +16,18 @@ class ArgoError(RuntimeError):
 
 POLL_SECONDS = 5
 REFRESH_INTERVAL_SECONDS = 30
+POD_FAILURE_REASONS = frozenset(
+    {
+        "CrashLoopBackOff",
+        "ImagePullBackOff",
+        "ErrImagePull",
+        "CreateContainerConfigError",
+        "CreateContainerError",
+        "InvalidImageName",
+    }
+)
+WORKLOAD_KINDS = frozenset({"StatefulSet", "Deployment", "DaemonSet"})
+TERMINAL_OPERATION_PHASES = frozenset({"Failed", "Error", "Terminated"})
 
 
 def _has_revision(sync: dict, revision: str) -> bool:
@@ -67,14 +79,213 @@ def _summary_images(payload: dict) -> set[str]:
     return {item for item in images if isinstance(item, str) and item}
 
 
+def _resource_label(resource: dict) -> str:
+    group = resource.get("group")
+    kind = resource.get("kind") or "Resource"
+    name = resource.get("name") or "unknown"
+    return f"{group + '/' if group else ''}{kind}/{name}"
+
+
+def _state_description(payload: dict, expected_images: tuple[str, ...] = ()) -> str:
+    status = payload.get("status") or {}
+    sync = status.get("sync") or {}
+    health = status.get("health") or {}
+    operation = status.get("operationState") or {}
+    observed_images = _summary_images(payload)
+    state = (
+        f"revision={sync.get('revision')} sync={sync.get('status')} "
+        f"health={health.get('status')} operation={operation.get('phase', '-')}"
+    )
+    message = operation.get("message") or health.get("message")
+    if message:
+        state += f" message={str(message).replace(chr(10), ' ')}"
+    if expected_images:
+        state += f" images={','.join(sorted(observed_images)) or 'none'}"
+    resources = status.get("resources") or []
+    if isinstance(resources, list) and resources:
+        details: list[str] = []
+        for resource in resources:
+            if not isinstance(resource, dict):
+                continue
+            health_info = resource.get("health") or {}
+            detail = f"{_resource_label(resource)}={resource.get('status', '-')}"
+            if health_info.get("status"):
+                detail += f"/{health_info['status']}"
+            if resource.get("requiresPruning"):
+                detail += "/requiresPruning"
+            details.append(detail)
+        if details:
+            state += f" resources={';'.join(details)}"
+    return state
+
+
+def _payload_failure(payload: dict) -> str | None:
+    status = payload.get("status") or {}
+    operation = status.get("operationState") or {}
+    phase = operation.get("phase")
+    if phase in TERMINAL_OPERATION_PHASES:
+        return f"operation phase is {phase}"
+    health = status.get("health") or {}
+    if health.get("status") == "Degraded":
+        return f"application health is Degraded: {health.get('message') or 'no message'}"
+    resources = status.get("resources") or []
+    if isinstance(resources, list):
+        for resource in resources:
+            if not isinstance(resource, dict):
+                continue
+            resource_health = resource.get("health") or {}
+            if resource_health.get("status") == "Degraded":
+                return (
+                    f"resource {_resource_label(resource)} is Degraded: "
+                    f"{resource_health.get('message') or 'no message'}"
+                )
+    return None
+
+
+def _kubectl_json(kubeconfig: str, arguments: list[str]) -> dict | None:
+    result = subprocess.run(
+        ["kubectl", "--kubeconfig", kubeconfig, *arguments, "-o", "json"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _tracked_workloads(payload: dict) -> list[tuple[str, str, str]]:
+    status = payload.get("status") or {}
+    resources = status.get("resources") or []
+    destination = (payload.get("spec") or {}).get("destination") or {}
+    default_namespace = destination.get("namespace") or "default"
+    workloads: list[tuple[str, str, str]] = []
+    if not isinstance(resources, list):
+        return workloads
+    for resource in resources:
+        if not isinstance(resource, dict) or resource.get("kind") not in WORKLOAD_KINDS:
+            continue
+        name = resource.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        namespace = resource.get("namespace") or default_namespace
+        workloads.append((resource["kind"], namespace, name))
+    return workloads
+
+
+def _pod_failures(kubeconfig: str, payload: dict) -> list[dict[str, str | int]]:
+    failures: list[dict[str, str | int]] = []
+    for kind, namespace, name in _tracked_workloads(payload):
+        resource_name = kind.lower()
+        workload = _kubectl_json(
+            kubeconfig,
+            ["get", resource_name, name, "-n", namespace],
+        )
+        if not workload:
+            continue
+        labels = ((workload.get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
+        if not isinstance(labels, dict) or not labels:
+            continue
+        selector = ",".join(f"{key}={value}" for key, value in sorted(labels.items()))
+        pods = _kubectl_json(
+            kubeconfig,
+            ["get", "pods", "-n", namespace, "-l", selector],
+        )
+        for pod in (pods or {}).get("items", []):
+            if not isinstance(pod, dict):
+                continue
+            pod_name = (pod.get("metadata") or {}).get("name")
+            if not isinstance(pod_name, str) or not pod_name:
+                continue
+            statuses = []
+            pod_status = pod.get("status") or {}
+            statuses.extend(pod_status.get("initContainerStatuses") or [])
+            statuses.extend(pod_status.get("containerStatuses") or [])
+            for container_status in statuses:
+                if not isinstance(container_status, dict):
+                    continue
+                current = container_status.get("state") or {}
+                waiting = current.get("waiting") or {}
+                terminated = current.get("terminated") or {}
+                reason = waiting.get("reason") or terminated.get("reason")
+                exit_code = terminated.get("exitCode")
+                if reason not in POD_FAILURE_REASONS and not (
+                    isinstance(exit_code, int) and exit_code != 0
+                ):
+                    continue
+                failures.append(
+                    {
+                        "workload": f"{kind}/{name}",
+                        "namespace": namespace,
+                        "pod": pod_name,
+                        "container": str(container_status.get("name") or "unknown"),
+                        "reason": str(reason or f"exitCode={exit_code}"),
+                        "restarts": int(container_status.get("restartCount") or 0),
+                        "message": str(waiting.get("message") or terminated.get("message") or ""),
+                    }
+                )
+    return failures
+
+
+def _pod_logs(kubeconfig: str, failure: dict[str, str | int]) -> str:
+    base = [
+        "kubectl",
+        "--kubeconfig",
+        kubeconfig,
+        "logs",
+        str(failure["pod"]),
+        "-n",
+        str(failure["namespace"]),
+        "-c",
+        str(failure["container"]),
+        "--tail=80",
+    ]
+    for previous in (True, False):
+        command = base + (["--previous"] if previous else [])
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        output = (result.stdout or result.stderr).strip()
+        if output:
+            if len(output) > 8_000:
+                output = output[-8_000:]
+            label = "previous" if previous else "current"
+            return f"logs({label})={output}"
+    return "logs=unavailable"
+
+
+def _format_failure(
+    application: str,
+    payload: dict,
+    reason: str,
+    kubeconfig: str = "",
+    pod_failures: list[dict[str, str | int]] | None = None,
+    expected_images: tuple[str, ...] = (),
+) -> str:
+    lines = [
+        f"Argo application {application} failed fast: {reason}",
+        f"  {_state_description(payload, expected_images)}",
+    ]
+    for failure in pod_failures or []:
+        lines.append(
+            "  pod="
+            f"{failure['namespace']}/{failure['pod']} container={failure['container']} "
+            f"workload={failure['workload']} reason={failure['reason']} "
+            f"restarts={failure['restarts']} message={failure['message']}"
+        )
+        if kubeconfig:
+            lines.append(f"  {_pod_logs(kubeconfig, failure)}")
+    return "\n".join(lines)
+
+
 def _ready_state(payload: dict, revision: str, expected_images: tuple[str, ...] = ()) -> tuple[bool, str]:
     status = payload.get("status") or {}
     sync = status.get("sync") or {}
     health = status.get("health") or {}
     observed_images = _summary_images(payload)
-    state = f"revision={sync.get('revision')} sync={sync.get('status')} health={health.get('status')}"
-    if expected_images:
-        state += f" images={','.join(sorted(observed_images)) or 'none'}"
+    state = _state_description(payload, expected_images)
     synced_healthy = sync.get("status") == "Synced" and health.get("status") == "Healthy"
     revision_ready = revision in _observed_revisions(payload)
     # Empty expected_images must not pass a Healthy app at another Git SHA.
@@ -161,6 +372,62 @@ def _get_application(kubeconfig: str, application: str, namespace: str = "argocd
         raise ArgoError(f"kubectl returned invalid Argo application JSON for {application}") from exc
 
 
+def terminate_operations(
+    kubeconfig: str,
+    applications: tuple[str, ...] | list[str],
+    timeout: int = 60,
+    argocd_namespace: str = "argocd",
+) -> None:
+    names = tuple(application for application in applications if application)
+    if not names:
+        raise ArgoError("at least one Argo application is required")
+    if not kubeconfig:
+        raise ArgoError("KUBECONFIG is required to terminate Argo operations")
+    deadline = time.monotonic() + timeout
+    for application in names:
+        payload, detail = _get_application(kubeconfig, application, argocd_namespace)
+        if payload is None:
+            raise ArgoError(f"cannot inspect Argo application {application}: {detail}")
+        if payload.get("operation") is None:
+            continue
+        result = subprocess.run(
+            [
+                "kubectl",
+                "--kubeconfig",
+                kubeconfig,
+                "-n",
+                argocd_namespace,
+                "patch",
+                "application",
+                application,
+                "--type=merge",
+                "-p",
+                '{"operation":null}',
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
+            raise ArgoError(f"failed to terminate Argo operation {application}: {detail}")
+
+    pending = set(names)
+    while pending and time.monotonic() < deadline:
+        for application in tuple(pending):
+            payload, detail = _get_application(kubeconfig, application, argocd_namespace)
+            if payload is None:
+                raise ArgoError(f"cannot inspect Argo application {application}: {detail}")
+            if payload.get("operation") is None:
+                pending.discard(application)
+        if pending:
+            time.sleep(min(POLL_SECONDS, max(0, deadline - time.monotonic())))
+    if pending:
+        raise ArgoError(
+            "Argo operations did not terminate: " + ", ".join(sorted(pending))
+        )
+
+
 def wait_applications(
     server: str,
     applications: tuple[str, ...] | list[str],
@@ -178,14 +445,17 @@ def wait_applications(
     pending = set(names)
     payloads: dict[str, dict] = {}
     last_states = {name: "unknown" for name in names}
+    last_payloads: dict[str, dict] = {}
     if kubeconfig:
         deadline = time.monotonic() + timeout
         last_refresh = 0.0
+        refresh_observed = {name: False for name in names}
+        pod_failure_counts = {name: 0 for name in names}
         while time.monotonic() < deadline:
             now = time.monotonic()
             if now - last_refresh >= max(0, refresh_interval):
                 for application in names:
-                    if application in pending:
+                    if application in pending and not refresh_observed[application]:
                         _request_hard_refresh(kubeconfig, application, argocd_namespace)
                 last_refresh = now
             for application in names:
@@ -195,6 +465,39 @@ def wait_applications(
                 if payload is None:
                     last_states[application] = last_state
                     continue
+                last_payloads[application] = payload
+                if revision in _observed_revisions(payload) or (
+                    images_by_app.get(application)
+                    and all(image in _summary_images(payload) for image in images_by_app[application])
+                ):
+                    refresh_observed[application] = True
+                failure = _payload_failure(payload)
+                if failure:
+                    raise ArgoError(
+                        _format_failure(
+                            application,
+                            payload,
+                            failure,
+                            kubeconfig,
+                            expected_images=images_by_app.get(application, ()),
+                        )
+                    )
+                pod_failures = _pod_failures(kubeconfig, payload)
+                if pod_failures:
+                    pod_failure_counts[application] += 1
+                    if pod_failure_counts[application] >= 2:
+                        raise ArgoError(
+                            _format_failure(
+                                application,
+                                payload,
+                                "tracked workload has a persistent failing Pod",
+                                kubeconfig,
+                                pod_failures,
+                                images_by_app.get(application, ()),
+                            )
+                        )
+                else:
+                    pod_failure_counts[application] = 0
                 ready, last_states[application] = _ready_state(
                     payload,
                     revision,
@@ -206,22 +509,43 @@ def wait_applications(
             if not pending:
                 return payloads
             time.sleep(min(POLL_SECONDS, max(0, deadline - time.monotonic())))
-        remaining = ", ".join(f"{name}: {last_states[name]}" for name in names if name in pending)
+        remaining_parts = []
+        for name in names:
+            if name not in pending:
+                continue
+            payload = last_payloads.get(name)
+            if payload:
+                failures = _pod_failures(kubeconfig, payload)
+                if failures:
+                    remaining_parts.append(
+                        _format_failure(
+                            name,
+                            payload,
+                            "timeout while tracked workload remains unhealthy",
+                            kubeconfig,
+                            failures,
+                            images_by_app.get(name, ()),
+                        )
+                    )
+                    continue
+            remaining_parts.append(f"{name}: {last_states[name]}")
+        remaining = "\n".join(remaining_parts)
         raise ArgoError(f"Argo application did not become healthy at revision {revision}: {remaining}")
     token = os.environ.get("ARGOCD_AUTH_TOKEN", "")
     endpoint = os.environ.get("ARGOCD_SERVER", server).rstrip("/")
     deadline = time.monotonic() + timeout
     last_refresh = 0.0
+    refresh_observed = {name: False for name in names}
     while time.monotonic() < deadline:
         now = time.monotonic()
-        refresh = now - last_refresh >= max(0, refresh_interval)
-        if refresh:
+        refresh_due = now - last_refresh >= max(0, refresh_interval)
+        if refresh_due:
             last_refresh = now
         for application in names:
             if application not in pending:
                 continue
             url = f"https://{endpoint}/api/v1/applications/{application}"
-            if refresh:
+            if refresh_due and not refresh_observed[application]:
                 url += "?refresh=hard"
             request = Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
             try:
@@ -230,6 +554,22 @@ def wait_applications(
             except (HTTPError, URLError, json.JSONDecodeError) as exc:
                 last_states[application] = str(exc)
                 continue
+            last_payloads[application] = payload
+            if revision in _observed_revisions(payload) or (
+                images_by_app.get(application)
+                and all(image in _summary_images(payload) for image in images_by_app[application])
+            ):
+                refresh_observed[application] = True
+            failure = _payload_failure(payload)
+            if failure:
+                raise ArgoError(
+                    _format_failure(
+                        application,
+                        payload,
+                        failure,
+                        expected_images=images_by_app.get(application, ()),
+                    )
+                )
             ready, last_states[application] = _ready_state(
                 payload,
                 revision,
@@ -241,7 +581,9 @@ def wait_applications(
         if not pending:
             return payloads
         time.sleep(min(POLL_SECONDS, max(0, deadline - time.monotonic())))
-    remaining = ", ".join(f"{name}: {last_states[name]}" for name in names if name in pending)
+    remaining = "\n".join(
+        f"{name}: {last_states[name]}" for name in names if name in pending
+    )
     raise ArgoError(f"Argo application did not become healthy at revision {revision}: {remaining}")
 
 

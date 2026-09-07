@@ -99,6 +99,7 @@ class Pipeline:
     schema_version: int = 1
     argocd_namespace: str = "argocd"
     application_suffix: str = "-dev"
+    argocd_wait_timeout_seconds: int = 600
     smoke_namespace: str = ""
     smoke_endpoints: tuple[tuple[str, str, str], ...] = ()
     smoke_env: tuple[tuple[str, str], ...] = ()
@@ -173,10 +174,17 @@ class Pipeline:
         shared_paths = [_safe_relative(item, "shared_paths entry") for item in shared_paths]
         argocd_namespace = value.get("argocd_namespace", "argocd")
         application_suffix = value.get("application_suffix", "-dev")
+        argocd_wait_timeout_seconds = value.get("argocd_wait_timeout_seconds", 600)
         smoke_namespace = value.get("smoke_namespace", "")
         for field, field_value in (("argocd_namespace", argocd_namespace), ("application_suffix", application_suffix), ("smoke_namespace", smoke_namespace)):
             if not isinstance(field_value, str) or (field == "argocd_namespace" and not field_value.strip()):
                 raise ConfigError(f"{field} must be a string" if field != "argocd_namespace" else "argocd_namespace must be a non-empty string")
+        if (
+            isinstance(argocd_wait_timeout_seconds, bool)
+            or not isinstance(argocd_wait_timeout_seconds, int)
+            or not 30 <= argocd_wait_timeout_seconds <= 3600
+        ):
+            raise ConfigError("argocd_wait_timeout_seconds must be an integer between 30 and 3600")
 
         raw_endpoints = value.get("smoke_endpoints", [])
         if not isinstance(raw_endpoints, list):
@@ -245,6 +253,7 @@ class Pipeline:
             schema_version=schema_version,
             argocd_namespace=argocd_namespace,
             application_suffix=application_suffix,
+            argocd_wait_timeout_seconds=argocd_wait_timeout_seconds,
             smoke_namespace=smoke_namespace,
             smoke_endpoints=tuple(smoke_endpoints),
             smoke_env=tuple((key, item) for key, item in raw_smoke_env.items()),

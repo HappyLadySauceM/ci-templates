@@ -44,7 +44,8 @@ ci-templates <command> --config .ci/pipeline.yaml
 | `snapshot` / `promote-snapshot` / `rollback-snapshot` | 本地复制或推送到 deploy 仓库 |
 | `build` / `prewarm` / `promote-candidate` / `cleanup-candidate` | 镜像构建与 Harbor 标签 |
 | `cleanup-previous` / `restore-previous` | `:dev` / `:previous` 生命周期 |
-| `argo-wait` | 等待 Application Synced + Healthy |
+| `argo-wait` | 等待 Application Synced + Healthy；明确失败时 fail-fast 并打印诊断 |
+| `argo-terminate` | 回滚前终止指定 Application 的进行中 operation |
 | `smoke` | 项目 `smoke_command` 或集群内置冒烟 |
 | `summarize` / `release` | 一次模型摘要 + 聚合 GitHub Release |
 | `status` | 写 GitHub commit status |

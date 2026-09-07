@@ -11,7 +11,7 @@ from .changes import affected_services, build_release_context, changed_paths, de
 from .config import ConfigError, load_config
 from .gitops import sync_snapshot, promote_snapshot, rollback_snapshot
 from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest, verify_builder
-from .argocd import wait_applications, wait_targets
+from .argocd import terminate_operations, wait_applications, wait_targets
 from .smoke import run as run_smoke, run_kubernetes
 from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
 from .release import render_aggregate_release, strip_release_version_heading, summarize_release_with_deepseek, summarize_with_deepseek
@@ -85,6 +85,12 @@ def main(argv: list[str] | None = None) -> int:
     argo.add_argument("--config", default=None)
     argo.add_argument("--revision", required=True)
     argo.add_argument("--services", default="")
+    argo.add_argument("--timeout", type=int, default=None)
+
+    terminate = subparsers.add_parser("argo-terminate")
+    terminate.add_argument("--config", default=None)
+    terminate.add_argument("--services", default="")
+    terminate.add_argument("--timeout", type=int, default=60)
 
     smoke = subparsers.add_parser("smoke")
     smoke.add_argument("--config", default=None)
@@ -234,6 +240,9 @@ def main(argv: list[str] | None = None) -> int:
             config = load_config(args.config)
             if not config.argocd_server:
                 raise ConfigError("argocd_server is required")
+            timeout = args.timeout if args.timeout is not None else config.argocd_wait_timeout_seconds
+            if not 30 <= timeout <= 3600:
+                raise ConfigError("argo-wait timeout must be between 30 and 3600 seconds")
             selected = [item.strip() for item in args.services.split(",") if item.strip()]
             overrides = json.loads(os.environ.get("CI_GITOPS_IMAGE_OVERRIDES_JSON", "{}") or "{}")
             if not isinstance(overrides, dict):
@@ -252,7 +261,29 @@ def main(argv: list[str] | None = None) -> int:
                 config.argocd_server,
                 tuple(targets),
                 args.revision,
+                timeout=timeout,
                 expected_images=targets,
+                argocd_namespace=config.argocd_namespace,
+            )
+        elif args.command == "argo-terminate":
+            config = load_config(args.config)
+            if not 5 <= args.timeout <= 300:
+                raise ConfigError("argo-terminate timeout must be between 5 and 300 seconds")
+            selected = [item.strip() for item in args.services.split(",") if item.strip()]
+            if selected:
+                services = [service for service in config.services if service.name in selected]
+                missing = [name for name in selected if name not in {service.name for service in services}]
+                if missing:
+                    raise ConfigError(f"unknown service: {', '.join(missing)}")
+                applications = tuple(wait_targets(services, application_suffix=config.application_suffix))
+            else:
+                if not config.argocd_application:
+                    raise ConfigError("argocd_application is required")
+                applications = (config.argocd_application,)
+            terminate_operations(
+                os.environ.get("KUBECONFIG", ""),
+                applications,
+                timeout=args.timeout,
                 argocd_namespace=config.argocd_namespace,
             )
         elif args.command == "smoke":

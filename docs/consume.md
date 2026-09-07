@@ -38,7 +38,7 @@ push dev
   → standard deploy-release:
         promote-snapshot(CAS retry) → apply ApplicationSet
         → argo-wait → smoke → Harbor tag promotion + release
-        → 失败且冒烟未通过则 rollback-snapshot
+        → 失败且冒烟未通过则 argo-terminate → rollback-snapshot → rollback argo-wait
   → standard cleanup-candidates
   → notify: 看板未启用时发 CICD 卡；deploy-release 产出 release_tag 时发蓝色发版卡
   → ubuntu-latest task tracker: 看板启用后同步执行中与终态
