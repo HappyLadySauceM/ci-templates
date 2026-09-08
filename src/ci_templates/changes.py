@@ -20,7 +20,7 @@ _SENSITIVE_LINE = re.compile(
 
 
 def changed_paths(base: str, head: str = "HEAD", cwd: str = ".") -> list[str]:
-    command = ["git", "ls-tree", "-r", "--name-only", head] if base and set(base) == {"0"} else ["git", "diff", "--name-only", "--diff-filter=ACMR", f"{base}...{head}"]
+    command = ["git", "ls-tree", "-r", "--name-only", head] if base and set(base) == {"0"} else ["git", "diff", "--name-only", "--diff-filter=ACMRTD", f"{base}...{head}"]
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -74,6 +74,10 @@ def _shared_prefixes(pipeline: Pipeline) -> tuple[str, ...]:
     return tuple(path.rstrip("/") for path in pipeline.shared_paths)
 
 
+def _documentation_prefixes(pipeline: Pipeline) -> tuple[str, ...]:
+    return tuple(path.rstrip("/") for path in pipeline.documentation_paths)
+
+
 def _is_under_prefix(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix + "/")
 
@@ -90,7 +94,21 @@ def _service_business_match(service: Service, path: str) -> bool:
 
 def _service_source_match(service: Service, path: str) -> bool:
     source = service.source_path.rstrip("/")
-    return path in {service.source_path, service.dockerfile} or _is_under_prefix(path, source)
+    return (
+        path in {service.source_path, service.dockerfile}
+        or _is_under_prefix(path, source)
+        or any(_is_under_prefix(path, prefix.rstrip("/")) for prefix in service.additional_source_paths)
+    )
+
+
+def documentation_changed(pipeline: Pipeline, paths: Iterable[str]) -> bool:
+    """Return whether a change is documentation-only work configured for a light gate."""
+    prefixes = _documentation_prefixes(pipeline)
+    return any(_is_under_prefix(path, prefix) for path in paths for prefix in prefixes)
+
+
+def _is_documentation_path(pipeline: Pipeline, path: str) -> bool:
+    return any(_is_under_prefix(path, prefix) for prefix in _documentation_prefixes(pipeline))
 
 
 def _service_deploy_match(service: Service, path: str) -> bool:
@@ -169,7 +187,7 @@ def read_release_context(path: str | Path) -> dict[str, Any]:
 
 
 def affected_services(pipeline: Pipeline, paths: Iterable[str]) -> tuple[str, ...]:
-    paths = tuple(paths)
+    paths = tuple(path for path in paths if not _is_documentation_path(pipeline, path))
     if not paths:
         return ()
     affected: set[str] = set()

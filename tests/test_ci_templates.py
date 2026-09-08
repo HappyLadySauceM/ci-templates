@@ -12,6 +12,7 @@ import unittest
 
 from ci_templates.changes import (
     affected_services,
+    documentation_changed,
     build_release_context,
     classify_release_paths,
     deploy_changed,
@@ -180,6 +181,25 @@ class CiTemplatesTest(unittest.TestCase):
 
     def test_unrelated_changes_are_ignored(self):
         self.assertEqual(affected_services(config(), ["docs/README.md"]), ())
+
+    def test_documentation_path_uses_light_gate_without_building_services(self):
+        pipeline = Pipeline.from_mapping({
+            "project": "example", "source_repo": "org/example", "gitops_repo": "org/gitops", "gitops_path": "Example", "gitops_branch": "main",
+            "documentation_paths": ["api/README.md"],
+            "services": [{"name": "gateway", "source_path": "services/gateway", "version_file": "services/gateway/VERSION", "dockerfile": "docker/gateway/Dockerfile", "context": ".", "image_repository": "org/gateway", "deploy_snapshot": "deploy/gateway"}],
+        })
+        self.assertTrue(documentation_changed(pipeline, ["api/README.md"]))
+        self.assertEqual(affected_services(pipeline, ["api/README.md"]), ())
+
+    def test_additional_source_path_rebuilds_only_its_owner(self):
+        raw = {
+            "project": "example", "source_repo": "org/example", "gitops_repo": "org/gitops", "gitops_path": "Example", "gitops_branch": "main",
+            "services": [
+                {"name": "gateway", "source_path": "services/gateway", "additional_source_paths": ["api"], "version_file": "services/gateway/VERSION", "dockerfile": "docker/gateway/Dockerfile", "context": ".", "image_repository": "org/gateway", "deploy_snapshot": "deploy/gateway"},
+                {"name": "identity", "source_path": "services/identity", "version_file": "services/identity/VERSION", "dockerfile": "docker/identity/Dockerfile", "context": ".", "image_repository": "org/identity", "deploy_snapshot": "deploy/identity"},
+            ],
+        }
+        self.assertEqual(affected_services(Pipeline.from_mapping(raw), ["api/openapi.json"]), ("gateway",))
 
     def test_deploy_changes_are_separate_from_image_builds(self):
         paths = ["deploy/gateway/overlay/dev/config.yaml"]

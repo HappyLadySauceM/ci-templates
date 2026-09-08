@@ -7,7 +7,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from .changes import affected_services, build_release_context, changed_paths, deploy_changed, deploy_services, read_release_context, release_services, resolve_revision, write_release_context
+from .changes import affected_services, build_release_context, changed_paths, deploy_changed, deploy_services, documentation_changed, read_release_context, release_services, resolve_revision, write_release_context
 from .config import ConfigError, load_config
 from .gitops import sync_snapshot, promote_snapshot, rollback_snapshot
 from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest, verify_builder
@@ -160,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
                 "deploy_services": deploy,
                 "release_services": release,
                 "deploy_changed": deploy_changed(config, paths),
+                "documentation_changed": documentation_changed(config, paths),
             }, sort_keys=True))
         elif args.command == "versions":
             config = load_config(args.config)

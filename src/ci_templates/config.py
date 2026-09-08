@@ -41,6 +41,7 @@ class Service:
     deploy_snapshot: str
     kustomize_name: str
     artifact_group: str = ""
+    additional_source_paths: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(
@@ -65,12 +66,17 @@ class Service:
         artifact_group = value.get("artifact_group", "")
         if not isinstance(artifact_group, str):
             raise ConfigError("artifact_group must be a string")
+        additional_source_paths = value.get("additional_source_paths", [])
+        if not isinstance(additional_source_paths, list) or not all(isinstance(item, str) and item.strip() for item in additional_source_paths):
+            raise ConfigError("additional_source_paths must be a list of non-empty relative paths")
+        additional_source_paths = tuple(_safe_relative(item, "service.additional_source_paths entry") for item in additional_source_paths)
         for field in ("source_path", "version_file", "dockerfile", "context", "deploy_snapshot"):
             _safe_relative(value[field], f"service.{field}")
         return cls(
             **{field: value[field] for field in fields},
             kustomize_name=kustomize_name,
             artifact_group=artifact_group,
+            additional_source_paths=additional_source_paths,
         )
 
 
@@ -84,6 +90,7 @@ class Pipeline:
     gitops_branch: str
     services: tuple[Service, ...]
     shared_paths: tuple[str, ...]
+    documentation_paths: tuple[str, ...]
     harbor_registry: str
     harbor_project: str
     argocd_server: str
@@ -172,6 +179,10 @@ class Pipeline:
         if not isinstance(shared_paths, list) or not all(isinstance(item, str) and item.strip() for item in shared_paths):
             raise ConfigError("shared_paths must be a list of non-empty relative paths")
         shared_paths = [_safe_relative(item, "shared_paths entry") for item in shared_paths]
+        documentation_paths = value.get("documentation_paths", [])
+        if not isinstance(documentation_paths, list) or not all(isinstance(item, str) and item.strip() for item in documentation_paths):
+            raise ConfigError("documentation_paths must be a list of non-empty relative paths")
+        documentation_paths = [_safe_relative(item, "documentation_paths entry") for item in documentation_paths]
         argocd_namespace = value.get("argocd_namespace", "argocd")
         application_suffix = value.get("application_suffix", "-dev")
         argocd_wait_timeout_seconds = value.get("argocd_wait_timeout_seconds", 600)
@@ -238,6 +249,7 @@ class Pipeline:
             gitops_branch=value["gitops_branch"],
             services=services,
             shared_paths=tuple(shared_paths),
+            documentation_paths=tuple(documentation_paths),
             harbor_registry=value.get("harbor_registry", "harbor.happyladysauce.local"),
             harbor_project=value.get("harbor_project", "knowledge-core"),
             argocd_server=value.get("argocd_server", ""),
