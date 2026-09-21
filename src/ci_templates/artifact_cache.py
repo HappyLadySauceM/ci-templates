@@ -189,7 +189,14 @@ def restore(name: str, destination: str) -> dict[str, object]:
         except (ArtifactCacheError, GitHubError):
             raise
     payload, info = cached
-    _secure_extract(payload, Path(destination))
+    try:
+        _secure_extract(payload, Path(destination))
+    except ArtifactCacheError:
+        # A hash-valid but structurally invalid archive is still unusable.
+        # Remove it so the next attempt fetches a fresh remote copy instead of
+        # repeatedly replaying the same corrupt cache entry.
+        _discard_entry(name)
+        raise
     return {"name": name, "source": source, "sha256": info["sha256"], "artifact_id": info.get("artifact_id", "")}
 
 
@@ -229,7 +236,11 @@ def restore_pattern(pattern: str, destination: str) -> list[dict[str, object]]:
             source = "github"
             cached = _download_from_github(name, selected=item)
         payload, info = cached
-        _secure_extract(payload, Path(destination))
+        try:
+            _secure_extract(payload, Path(destination))
+        except ArtifactCacheError:
+            _discard_entry(name)
+            raise
         results.append({"name": name, "source": source, "sha256": info["sha256"], "artifact_id": info.get("artifact_id", "")})
     return results
 

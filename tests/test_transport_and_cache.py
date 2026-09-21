@@ -108,6 +108,7 @@ class ArtifactCacheTest(unittest.TestCase):
             with patch.dict(os.environ, environment, clear=False):
                 with self.assertRaises(ArtifactCacheError):
                     restore("plan", str(Path(directory) / "destination"))
+            self.assertFalse(entry.exists())
 
 
 class MaintenanceTest(unittest.TestCase):
