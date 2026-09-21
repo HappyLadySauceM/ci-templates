@@ -1,0 +1,233 @@
+"""Content-addressed, node-local fallback for GitHub Actions artifacts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import fnmatch
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import stat
+import tempfile
+import time
+from urllib.request import Request, urlopen
+from zipfile import BadZipFile, ZipFile
+
+from .github import GitHubError, _request
+from .transport import request_with_retry
+
+
+class ArtifactCacheError(RuntimeError):
+    pass
+
+
+_SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,180}\Z")
+
+
+def _metadata() -> tuple[str, str, str]:
+    repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
+    sha = os.environ.get("GITHUB_SHA", "").strip()
+    if not repository or not run_id or not sha:
+        raise ArtifactCacheError("GITHUB_REPOSITORY, GITHUB_RUN_ID and GITHUB_SHA are required")
+    return repository, run_id, sha
+
+
+def _validate_name(name: str) -> str:
+    value = name.strip()
+    if not _SAFE_NAME.fullmatch(value):
+        raise ArtifactCacheError(f"unsafe artifact name: {name!r}")
+    return value
+
+
+def _root() -> Path:
+    root = Path(os.environ.get("CI_ARTIFACT_CACHE_ROOT", "/cache/ci-templates/artifacts"))
+    if not root.is_absolute() or root == Path("/"):
+        raise ArtifactCacheError("CI_ARTIFACT_CACHE_ROOT must be an absolute non-root path")
+    return root
+
+
+def _entry(name: str) -> Path:
+    _, run_id, sha = _metadata()
+    return _root() / run_id / sha / _validate_name(name)
+
+
+def _cache_zip(name: str) -> tuple[Path, Path]:
+    entry = _entry(name)
+    return entry / "payload.zip", entry / "metadata.json"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_cached(name: str) -> tuple[Path, dict] | None:
+    payload, metadata = _cache_zip(name)
+    try:
+        info = json.loads(metadata.read_text(encoding="utf-8"))
+        if not payload.is_file() or info.get("sha256") != _sha256(payload):
+            _discard_entry(name)
+            return None
+        repository, run_id, sha = _metadata()
+        if info.get("repository") != repository or info.get("run_id") != run_id or info.get("sha") != sha:
+            return None
+        return payload, info
+    except (OSError, ValueError, KeyError):
+        _discard_entry(name)
+        return None
+
+
+def _discard_entry(name: str) -> None:
+    """Drop a corrupt entry before a remote retry; never use stale bytes."""
+
+    try:
+        shutil.rmtree(_entry(name))
+    except FileNotFoundError:
+        pass
+
+
+def _secure_extract(payload: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    temp_root = os.environ.get("RUNNER_TEMP", "").strip()
+    if temp_root:
+        Path(temp_root).mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix="artifact-extract-", dir=temp_root or None))
+    try:
+        with ZipFile(payload) as archive:
+            for member in archive.infolist():
+                relative = PurePosixPath(member.filename)
+                mode = (member.external_attr >> 16) & 0o170000
+                if relative.is_absolute() or ".." in relative.parts or mode == stat.S_IFLNK:
+                    raise ArtifactCacheError("artifact contains an unsafe path")
+            archive.extractall(stage)
+        for item in stage.iterdir():
+            target = destination / item.name
+            if item.is_dir():
+                shutil.copytree(item, target, dirs_exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+    except BadZipFile as exc:
+        raise ArtifactCacheError("cached artifact is not a valid zip") from exc
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _artifact_listing() -> list[dict]:
+    repository, run_id, _ = _metadata()
+    items: list[dict] = []
+    for page in range(1, 101):
+        payload = _request("GET", f"/repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100&page={page}") or {}
+        page_items = payload.get("artifacts", [])
+        if not isinstance(page_items, list):
+            raise ArtifactCacheError("GitHub artifact listing is invalid")
+        items.extend(item for item in page_items if isinstance(item, dict) and not item.get("expired"))
+        if len(page_items) < 100:
+            break
+    else:
+        raise ArtifactCacheError("GitHub artifact listing exceeded pagination limit")
+    return items
+
+
+def _download_from_github(name: str, *, selected: dict | None = None) -> tuple[Path, dict]:
+    repository, run_id, sha = _metadata()
+    matches = [item for item in _artifact_listing() if item.get("name") == name]
+    if not matches:
+        raise ArtifactCacheError(f"GitHub artifact not found: {name}")
+    selected = selected or max(matches, key=lambda item: int(item.get("id") or 0))
+    archive_url = str(selected.get("archive_download_url") or "")
+    artifact_id = str(selected.get("id") or "")
+    if not archive_url or not artifact_id:
+        raise ArtifactCacheError(f"GitHub artifact has no download URL: {name}")
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not token:
+        raise ArtifactCacheError("GITHUB_TOKEN is required to download artifacts")
+    request = Request(
+        archive_url,
+        headers={"Accept": "application/zip", "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"},
+        method="GET",
+    )
+    entry = _entry(name)
+    entry.mkdir(parents=True, exist_ok=True)
+    temporary = entry.parent / f".{entry.name}.zip.tmp"
+    try:
+        response_context = request_with_retry(urlopen, request, timeout=120)
+        with response_context as response, temporary.open("wb") as stream:
+            # ``HTTPResponse`` implements sized reads; a few lightweight
+            # clients expose only ``read()``. Keep the streaming path for
+            # real downloads while remaining compatible with both forms.
+            try:
+                shutil.copyfileobj(response, stream)
+            except TypeError:
+                stream.write(response.read())
+        digest = _sha256(temporary)
+        info = {"repository": repository, "run_id": run_id, "sha": sha, "name": name, "artifact_id": artifact_id, "sha256": digest}
+        temporary.replace(entry / "payload.zip")
+        metadata_temporary = entry.parent / f".{entry.name}.metadata.tmp"
+        metadata_temporary.write_text(json.dumps(info, sort_keys=True) + "\n", encoding="utf-8")
+        metadata_temporary.replace(entry / "metadata.json")
+        return entry / "payload.zip", info
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def restore(name: str, destination: str) -> dict[str, object]:
+    name = _validate_name(name)
+    cached = _read_cached(name)
+    source = "cache"
+    if cached is None:
+        source = "github"
+        try:
+            cached = _download_from_github(name)
+        except (ArtifactCacheError, GitHubError):
+            raise
+    payload, info = cached
+    _secure_extract(payload, Path(destination))
+    return {"name": name, "source": source, "sha256": info["sha256"], "artifact_id": info.get("artifact_id", "")}
+
+
+def restore_pattern(pattern: str, destination: str) -> list[dict[str, object]]:
+    pattern = pattern.strip()
+    if not pattern or any(part in {"", ".", ".."} for part in pattern.split("/")):
+        raise ArtifactCacheError("artifact pattern must be non-empty and relative")
+    matches = [item for item in _artifact_listing() if fnmatch.fnmatch(str(item.get("name") or ""), pattern)]
+    if not matches:
+        raise ArtifactCacheError(f"GitHub artifacts do not match pattern: {pattern}")
+    results: list[dict[str, object]] = []
+    for item in sorted(matches, key=lambda value: str(value.get("name") or "")):
+        name = _validate_name(str(item.get("name") or ""))
+        cached = _read_cached(name)
+        source = "cache"
+        if cached is None:
+            source = "github"
+            cached = _download_from_github(name, selected=item)
+        payload, info = cached
+        _secure_extract(payload, Path(destination))
+        results.append({"name": name, "source": source, "sha256": info["sha256"], "artifact_id": info.get("artifact_id", "")})
+    return results
+
+
+def cache_prune(*, max_age_seconds: int = 72 * 3600, dry_run: bool = False) -> list[str]:
+    """Remove only validated artifact-cache entries older than the retention."""
+
+    root = _root()
+    if not root.exists():
+        return []
+    cutoff = time.time() - max_age_seconds
+    removed: list[str] = []
+    for path in root.glob("*/*/*"):
+        if not path.is_dir() or path.name.startswith("."):
+            continue
+        if path.stat().st_mtime >= cutoff:
+            continue
+        removed.append(str(path))
+        if not dry_run:
+            shutil.rmtree(path)
+    return removed

@@ -186,7 +186,43 @@ class TrackerTest(unittest.TestCase):
         self.assertEqual(result["task_guid"], "task")
         self.assertEqual(tracker.create_task.call_args.args[1], "section-未触发")
 
-    def test_sync_updates_section_and_only_managed_followers(self):
+    def test_task_title_uses_repository_basename(self):
+        self.assertEqual(task_tracker.task_title("HappyLadySauceM/Knowledge-Core"), "Knowledge-Core")
+        self.assertEqual(task_tracker.task_title("Knowledge-Core-Web"), "Knowledge-Core-Web")
+
+    def test_create_task_uses_assignees_and_repository_title(self):
+        tracker = self.make_tracker()
+        tracker.feishu.call.return_value = {"task": {"guid": "task"}}
+        tracker.create_task("list", "section", description="pending", extra={}, assignees=["ou-a", "ou-b"])
+        call = tracker.feishu.call.call_args
+        self.assertEqual(call.kwargs["body"]["summary"], "repo")
+        self.assertEqual(
+            call.kwargs["body"]["members"],
+            [
+                {"id": "ou-a", "type": "user", "role": "assignee"},
+                {"id": "ou-b", "type": "user", "role": "assignee"},
+            ],
+        )
+
+    def test_find_task_migrates_legacy_title_by_extra_identity(self):
+        tracker = self.make_tracker()
+        tracker.feishu.pages.return_value = [{"guid": "legacy"}]
+        tracker.feishu.call.return_value = {
+            "task": {
+                "guid": "legacy",
+                "summary": "CICD：HappyLadySauceM/Knowledge-Core",
+                "extra": json.dumps({
+                    "kind": task_tracker.EXTRA_KIND,
+                    "repository": "org/repo",
+                    "workflow": "knowledge-core-pipeline",
+                }),
+            }
+        }
+        task, extra = tracker.find_task("list")
+        self.assertEqual(task["guid"], "legacy")
+        self.assertEqual(extra["repository"], "org/repo")
+
+    def test_sync_updates_section_and_only_managed_assignees(self):
         tracker = self.make_tracker()
         tracker.ensure_board = MagicMock(
             return_value=({"guid": "list"}, {name: "section-%s" % name for name in task_tracker.BOARD_STATES})
@@ -223,8 +259,15 @@ class TrackerTest(unittest.TestCase):
             if call.args[0] == "PATCH"
         )
         serialized = json.loads(patch_call.kwargs["body"]["task"]["extra"])
-        self.assertEqual(serialized["managed_followers"], ["ou-new"])
-        self.assertNotIn("ou-manual", serialized["managed_followers"])
+        self.assertEqual(serialized["managed_assignees"], ["ou-new"])
+        self.assertEqual(serialized["managed_followers"], [])
+        self.assertNotIn("ou-manual", serialized["managed_assignees"])
+        add_call = next(
+            call
+            for call in tracker.feishu.call.call_args_list
+            if call.args[0] == "POST" and call.args[1].endswith("/add_members")
+        )
+        self.assertEqual(add_call.kwargs["body"]["members"], [{"id": "ou-new", "type": "user", "role": "assignee"}])
 
     def test_stale_event_does_not_call_identity_or_update_apis(self):
         tracker = self.make_tracker()

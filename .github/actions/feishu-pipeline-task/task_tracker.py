@@ -6,8 +6,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import sys
 import time
+import email.utils
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -34,11 +36,17 @@ RETRYABLE_STATUS_CODES = frozenset({408, 429}) | frozenset(range(500, 600))
 RETRY_DELAYS = (1, 2)
 MAX_ATTEMPTS = 3
 EXTRA_KIND = "github_actions_pipeline"
-EXTRA_SCHEMA = 1
+EXTRA_SCHEMA = 2
 
 
 class TrackerError(RuntimeError):
     """Raised when a remote API or tracker invariant fails."""
+
+
+def task_title(repository: str) -> str:
+    """Use the repository name as the stable, human-readable board title."""
+
+    return repository.rsplit("/", 1)[-1] or repository
 
 
 class JsonApi:
@@ -67,6 +75,7 @@ class JsonApi:
         if auth and self.token:
             headers["Authorization"] = "Bearer %s" % self.token
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+        retryable_method = method.upper() in {"GET", "HEAD", "OPTIONS"}
         for attempt in range(1, MAX_ATTEMPTS + 1):
             request = Request(url, data=data, headers=headers, method=method)
             try:
@@ -76,21 +85,40 @@ class JsonApi:
                 return parsed
             except HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
-                retryable = exc.code in RETRYABLE_STATUS_CODES
+                retryable = retryable_method and exc.code in RETRYABLE_STATUS_CODES
                 if retryable and attempt < MAX_ATTEMPTS:
                     log.warning("%s %s returned HTTP %s; retrying", method, path, exc.code)
+                    retry_after = _retry_after(exc.headers.get("Retry-After") if exc.headers else None)
                 else:
                     raise TrackerError(
                         "%s %s failed with HTTP %s: %s" % (method, path, exc.code, detail[:500])
                     ) from exc
             except (URLError, TimeoutError) as exc:
-                if attempt >= MAX_ATTEMPTS:
+                if not retryable_method or attempt >= MAX_ATTEMPTS:
                     raise TrackerError("%s %s failed: %s" % (method, path, exc)) from exc
                 log.warning("%s %s failed with %s; retrying", method, path, type(exc).__name__)
+                retry_after = None
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise TrackerError("%s %s returned invalid JSON" % (method, path)) from exc
-            time.sleep(RETRY_DELAYS[attempt - 1])
+            delay = retry_after if retry_after is not None else RETRY_DELAYS[min(attempt - 1, len(RETRY_DELAYS) - 1)]
+            time.sleep(delay + random.uniform(0, min(0.25, delay * 0.25)))
         raise AssertionError("retry loop exhausted")
+
+
+def _retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, min(30.0, float(value)))
+    except ValueError:
+        pass
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return max(0.0, min(30.0, parsed.timestamp() - time.time()))
 
 
 class FeishuApi:
@@ -581,10 +609,9 @@ class PipelineTracker:
         summaries = self.feishu.pages(
             "/open-apis/task/v2/tasklists/%s/tasks" % tasklist_guid,
         )
-        title = "CICD：%s" % self.repository
         matched: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for summary in summaries:
-            if str(summary.get("summary") or "") != title or not summary.get("guid"):
+            if not summary.get("guid"):
                 continue
             data = self.feishu.call(
                 "GET", "/open-apis/task/v2/tasks/%s" % summary["guid"], query={"user_id_type": "open_id"}
@@ -608,10 +635,10 @@ class PipelineTracker:
         *,
         description: str,
         extra: dict[str, Any],
-        followers: list[str],
+        assignees: list[str],
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
-            "summary": "CICD：%s" % self.repository,
+            "summary": task_title(self.repository),
             "description": description,
             "completed_at": "0",
             "origin": {
@@ -624,9 +651,9 @@ class PipelineTracker:
             "extra": json.dumps(extra, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             "tasklists": [{"tasklist_guid": tasklist_guid, "section_guid": section_guid}],
         }
-        if followers:
+        if assignees:
             body["members"] = [
-                {"id": item, "type": "user", "role": "follower"} for item in followers[:50]
+                {"id": item, "type": "user", "role": "assignee"} for item in assignees[:50]
             ]
         data = self.feishu.call(
             "POST", "/open-apis/task/v2/tasks", body=body, query={"user_id_type": "open_id"}
@@ -646,6 +673,7 @@ class PipelineTracker:
                 "repository": self.repository,
                 "workflow": self.workflow_name,
                 "managed_followers": [],
+                "managed_assignees": [],
                 "latest": {"run_id": 0, "run_attempt": 0, "phase": 0, "state": "未触发"},
             }
             task = self.create_task(
@@ -653,13 +681,13 @@ class PipelineTracker:
                 sections["未触发"],
                 description="流水线尚未触发。",
                 extra=extra,
-                followers=[],
+                assignees=[],
             )
         return {
             "tasklist_guid": str(tasklist["guid"]),
             "task_guid": str(task["guid"]),
             "state": str((extra.get("latest") or {}).get("state") or "未触发"),
-            "matched_users": len(extra.get("managed_followers") or []),
+            "matched_users": len(extra.get("managed_assignees") or extra.get("managed_followers") or []),
         }
 
     def sync(self, run: dict[str, Any], action: str) -> dict[str, Any]:
@@ -673,7 +701,7 @@ class PipelineTracker:
                 "tasklist_guid": str(tasklist["guid"]),
                 "task_guid": str(task["guid"]),
                 "state": str((extra.get("latest") or {}).get("state") or state),
-                "matched_users": len(extra.get("managed_followers") or []),
+                "matched_users": len(extra.get("managed_assignees") or extra.get("managed_followers") or []),
             }
 
         identities = group_identity_map(self.feishu, self.chat_id, self.attr_id)
@@ -702,13 +730,17 @@ class PipelineTracker:
         old_followers = {
             str(item) for item in extra.get("managed_followers") or [] if str(item)
         }
+        old_assignees = {
+            str(item) for item in extra.get("managed_assignees") or [] if str(item)
+        }
         extra.update(
             {
                 "schema": EXTRA_SCHEMA,
                 "kind": EXTRA_KIND,
                 "repository": self.repository,
                 "workflow": self.workflow_name,
-                "managed_followers": desired,
+                "managed_followers": [],
+                "managed_assignees": desired,
                 "latest": {
                     "run_id": incoming[0],
                     "run_attempt": incoming[1],
@@ -725,7 +757,7 @@ class PipelineTracker:
                 sections[state],
                 description=description,
                 extra=extra,
-                followers=desired,
+                assignees=desired,
             )
         else:
             task_guid = str(task["guid"])
@@ -743,23 +775,39 @@ class PipelineTracker:
                 and item.get("role") == "follower"
                 and item.get("id")
             }
-            remove = sorted((old_followers - set(desired)) & current_followers)
-            add = sorted(set(desired) - current_followers)
-            if remove:
+            current_assignees = {
+                str(item.get("id") or "")
+                for item in task.get("members") or []
+                if isinstance(item, dict)
+                and item.get("type", "user") == "user"
+                and item.get("role") == "assignee"
+                and item.get("id")
+            }
+            remove_followers = sorted(old_followers & current_followers)
+            remove_assignees = sorted(old_assignees & current_assignees)
+            add_assignees = sorted(set(desired) - current_assignees)
+            if remove_followers:
                 self.feishu.call(
                     "POST",
                     "/open-apis/task/v2/tasks/%s/remove_members" % task_guid,
-                    body={"members": [{"id": item, "type": "user", "role": "follower"} for item in remove]},
+                    body={"members": [{"id": item, "type": "user", "role": "follower"} for item in remove_followers]},
                     query={"user_id_type": "open_id"},
                 )
-            if add:
+            if remove_assignees:
+                self.feishu.call(
+                    "POST",
+                    "/open-apis/task/v2/tasks/%s/remove_members" % task_guid,
+                    body={"members": [{"id": item, "type": "user", "role": "assignee"} for item in remove_assignees]},
+                    query={"user_id_type": "open_id"},
+                )
+            if add_assignees:
                 self.feishu.call(
                     "POST",
                     "/open-apis/task/v2/tasks/%s/add_members" % task_guid,
                     body={
                         "members": [
-                            {"id": item, "type": "user", "role": "follower"}
-                            for item in add
+                            {"id": item, "type": "user", "role": "assignee"}
+                            for item in add_assignees
                         ]
                     },
                     query={"user_id_type": "open_id"},
@@ -771,7 +819,7 @@ class PipelineTracker:
                 "/open-apis/task/v2/tasks/%s" % task_guid,
                 body={
                     "task": {
-                        "summary": "CICD：%s" % self.repository,
+                        "summary": task_title(self.repository),
                         "description": description,
                         "completed_at": "0",
                         "extra": json.dumps(
@@ -850,7 +898,7 @@ def main() -> int:
             result = tracker.sync(run, str(payload.get("action") or ""))
         _write_outputs(result)
         log.info(
-            "Feishu pipeline task synchronized state=%s task=%s followers=%s",
+            "Feishu pipeline task synchronized state=%s task=%s assignees=%s",
             result["state"],
             result["task_guid"],
             result["matched_users"],

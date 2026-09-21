@@ -57,7 +57,7 @@ outputs:
     description: Applied board state
     value: ${{ steps.track.outputs.state }}
   matched-users:
-    description: Number of matched Feishu followers
+    description: Number of matched Feishu assignees
     value: ${{ steps.track.outputs.matched-users }}
 
 runs:

@@ -8,6 +8,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from .transport import request_with_retry
+
 
 class GitHubError(RuntimeError):
     pass
@@ -24,14 +26,20 @@ def _request(method: str, endpoint: str, body: object | None = None, *, not_foun
         method=method,
     )
     try:
-        with urlopen(request, timeout=30) as response:
+        response_context = request_with_retry(
+            urlopen,
+            request,
+            timeout=30,
+            allow_write_retry=False,
+        )
+        with response_context as response:
             payload = response.read()
     except HTTPError as exc:
         if exc.code == 404 and not_found_ok:
             return None
         detail = exc.read().decode("utf-8", errors="replace")[:1000]
         raise GitHubError(f"GitHub API {method} {endpoint} failed: HTTP {exc.code}: {detail}") from exc
-    except URLError as exc:
+    except (URLError, TimeoutError, ConnectionError) as exc:
         raise GitHubError(f"GitHub API {method} {endpoint} failed: {exc}") from exc
     return json.loads(payload) if payload else {}
 
@@ -55,6 +63,45 @@ def create_release(repository: str, tag: str, target: str, body: str, *, name: s
     )
     assert created is not None
     return created
+
+
+def candidate_cleanup_allowed() -> tuple[bool, str]:
+    """Return whether this job may delete Harbor candidate tags.
+
+    GitHub reruns do not cancel jobs from the previous attempt. A stale
+    cleanup must not delete tags a newer attempt still needs to promote.
+    GitHub 重跑不会取消上一 attempt 的 job。过期 cleanup 不得删除新 attempt
+    仍要晋升的 tag。
+    """
+    run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
+    attempt_raw = os.environ.get("GITHUB_RUN_ATTEMPT", "").strip()
+    repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not run_id or not attempt_raw:
+        return True, ""
+    try:
+        current_attempt = int(attempt_raw)
+    except ValueError:
+        return False, "skipping candidate cleanup because GITHUB_RUN_ATTEMPT is invalid"
+    if current_attempt < 1:
+        return False, "skipping candidate cleanup because GITHUB_RUN_ATTEMPT is invalid"
+    if not repository:
+        return False, "skipping candidate cleanup because GITHUB_REPOSITORY is missing"
+    try:
+        payload = _request("GET", f"/repos/{repository}/actions/runs/{run_id}")
+    except GitHubError as exc:
+        return False, f"skipping candidate cleanup because the GitHub run lookup failed: {exc}"
+    if not payload:
+        return False, "skipping candidate cleanup because the GitHub run lookup returned no data"
+    try:
+        latest_attempt = int(payload.get("run_attempt") or 1)
+    except (TypeError, ValueError):
+        return False, "skipping candidate cleanup because run_attempt is invalid"
+    if current_attempt < latest_attempt:
+        return False, (
+            f"skipping candidate cleanup because run attempt {current_attempt} is stale; "
+            f"latest is {latest_attempt}"
+        )
+    return True, ""
 
 
 def set_commit_status(repository: str, sha: str, state: str, description: str, context: str, target_url: str = "") -> dict:

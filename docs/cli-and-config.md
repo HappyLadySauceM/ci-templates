@@ -15,7 +15,12 @@
 | `build` | `--service`、`--tag`（默认 `dev`）、`--artifact-manifest`、`--preserve-previous`、`--reuse-existing` | BuildKit 构建并推送；不可变候选 tag 重试时可复用远端镜像 |
 | `prewarm` | | 把 `base_images` 预热到 Harbor |
 | `promote-candidate` | `--service`、`--tag` | 通过 Harbor tag API 把候选 manifest 提升为配置的 active tag，不需要 Docker daemon |
-| `cleanup-candidate` | `--service`、`--tag` | 删除 Harbor 候选 tag |
+| `cleanup-candidate` | `--service`、`--tag` | 删除 Harbor 候选 tag；当前 GitHub run attempt 已过期或查询失败时跳过删除 |
+| `restore-candidate` | `--service`、`--tag`、`--digest` | 将仍存在的 digest 幂等恢复为候选 tag，并校验 manifest；供失败重跑复用 |
+| `prune-candidates` | `--max-age-hours`、`--protected-digest`、`--dry-run` | 失败候选安全清理；默认保留 72 小时，GitHub/Harbor 查询失败时 fail closed |
+| `artifact-cache restore` | `--name` 或 `--pattern`、`--destination` | 从校验过的节点缓存恢复制品，未命中时以退避重试从 GitHub 下载并原子缓存 |
+| `artifact-cache prune` | `--max-age-hours`、`--dry-run` | 清理过期制品缓存；默认保留 72 小时 |
+| `cache-prune` | `--root`、`--dry-run` | 在显式 `/cache` 子目录内按水位清理依赖/工具缓存 |
 | `cleanup-previous` | `--service` | 确认后删除 Harbor `:previous` |
 | `restore-previous` | `--service` | 从 `:previous` 恢复 `:dev` |
 | `argo-wait` | `--revision`、`--services`（逗号分隔）、`--timeout` | 等待 Application Synced + Healthy，并可匹配期望 digest；明确失败时 fail-fast 并打印诊断 |
@@ -119,5 +124,7 @@
 | `BUILD_CPU_PERCENT` | build | 并行比例 |
 | `BUILD_JOBS` | build | 紧急覆盖并行数 |
 | `HARBOR_USERNAME` / `HARBOR_PASSWORD` | harbor | 删除 tag；也可用 Docker config |
+| `CI_ARTIFACT_CACHE_ROOT` | artifact-cache | 制品缓存根目录（默认 `/cache/ci-templates/artifacts`） |
+| `CI_GITOPS_PROTECTED_DIGESTS_JSON` | prune-candidates | 由部署平台注入的当前 GitOps digest JSON 数组；清理时始终保护 |
 
 Chart 命令不读 Pipeline JSON，只读 `--manifest`。见 [Chart](charts.md)。

@@ -43,6 +43,8 @@ ci-templates <command> --config .ci/pipeline.yaml
 | `versions` | 读服务 `version_file` 并计算下一 patch tag |
 | `snapshot` / `promote-snapshot` / `rollback-snapshot` | 本地复制或推送到 deploy 仓库 |
 | `build` / `prewarm` / `promote-candidate` / `cleanup-candidate` | 镜像构建与 Harbor 标签 |
+| `restore-candidate` / `prune-candidates` | 失败重跑恢复候选 tag，或以 72 小时保留期安全清理候选 |
+| `artifact-cache` / `cache-prune` | 带摘要校验的 Artifact 缓存恢复，以及节点显式 `/cache` 子目录维护 |
 | `cleanup-previous` / `restore-previous` | `:dev` / `:previous` 生命周期 |
 | `argo-wait` | 等待 Application Synced + Healthy；明确失败时 fail-fast 并打印诊断 |
 | `argo-terminate` | 回滚前终止指定 Application 的进行中 operation |
@@ -78,7 +80,9 @@ ci-templates <command> --config .ci/pipeline.yaml
 镜像构建在 `hls-builder` ARC Scale Set 的隔离 Docker-in-Docker 容器中按 service matrix 构建（`max-parallel: 8` 对齐 `maxRunners: 8`）；质量与部署任务在 `hls-standard` Scale Set 中运行。当前标准池最多 8 个 runner（request 2 CPU / 4Gi，limit 4 CPU / 8Gi），特权构建池最多 8 个 runner（DinD `"4"` / 4Gi 加 runner `"4"` / 1Gi 加 init `500m` / `256Mi`，CPU/内存 limit 配额 68/42Gi，request 仍 64/40Gi）。池、缓存与接入清单见 [ARC 实现](docs/arc.md)。默认复用名为 `ci-templates` 的稳定 Buildx builder，以便同一 runner 上跨服务保留 BuildKit cache；`BUILDKIT_IMAGE` 控制 `docker-container` driver 使用的 BuildKit 镜像，`hls-builder` 固定使用 Harbor 内部 digest，避免冷启动访问 Docker Hub；创建 builder 前 CLI 会显式预拉取该镜像，让 DinD daemon 使用 runner 已配置的 Harbor 凭据；需要在同一 Docker daemon 上隔离不同流水线时，可通过 `CI_BUILDER_NAME` 指定仅含字母、数字、`.`, `_`, `-` 且不超过 63 个字符的 builder 名，每个名称使用独立的资源 marker。未设置时保持 `ci-templates` 及其原有 marker 路径不变。编译并行默认是 runner 有效 CPU（亲和性与 cgroup 配额）的 75%，至少 1。用 `BUILD_CPU_PERCENT` 调整比例；`BUILD_JOBS` 仅作有界紧急覆盖。BuildKit GC 按配置水位回收。设置 `CI_REGISTRY_CA_FILE` 时，marker 只保存 CA 文件的 SHA-256 指纹；CA 内容变化会受控重建 builder，不会写入 marker。
 
 `build` 可接收一份经 SHA256 校验的 artifact manifest，让只负责打包的 Dockerfile 使用质量作业已经编好的二进制，而不再编译一次。
-候选 tag 按源 commit 命名且在 Harbor 中设为不可变；工作流重试会通过 `--reuse-existing` 复用已存在的候选 manifest。
+候选 tag 按源 commit 命名且在 Harbor 中设为不可变；工作流重试会通过 `--reuse-existing` 复用已存在的候选 manifest。`cleanup-candidate` 只删除仍属于当前最新 attempt 的候选 tag；过期 attempt 或 GitHub run 查询失败时跳过删除，避免重跑竞态。
+
+所有受控 GET/HEAD/下载共享最多 5 次的指数退避与 `Retry-After`，写请求默认不重试；Artifact 缓存按 repository/run/SHA/name 寻址，损坏或摘要不匹配的副本会丢弃，绝不会作为旧资源兜底。维护命令默认 fail closed，并支持 `--dry-run`；失败候选保留 72 小时，依赖和工具缓存由节点维护命令按 30 天保留及 80%/70% 磁盘水位清理。
 
 ## 本地验证
 

@@ -1,0 +1,45 @@
+name: Prepare Harbor credentials
+description: Write short-lived Harbor Docker and CA files without exposing secrets
+inputs:
+  docker-config-json:
+    description: Docker config JSON containing the Harbor credential
+    required: true
+  ca-pem:
+    description: Harbor CA PEM
+    required: true
+  directory:
+    description: Name of the private directory below RUNNER_TEMP
+    required: false
+    default: harbor
+runs:
+  using: composite
+  steps:
+    - name: Write Harbor credential files
+      shell: bash
+      env:
+        HARBOR_DOCKER_CONFIG_JSON: ${{ inputs.docker-config-json }}
+        HARBOR_CA_PEM: ${{ inputs.ca-pem }}
+        HARBOR_DIRECTORY: ${{ inputs.directory }}
+      run: |
+        set -euo pipefail
+        umask 077
+        case "$HARBOR_DIRECTORY" in
+          harbor|release|build|verify) ;;
+          *) echo "unsafe Harbor credential directory" >&2; exit 1 ;;
+        esac
+        target="$RUNNER_TEMP/$HARBOR_DIRECTORY"
+        install -d "$target"
+        printf '%s' "$HARBOR_DOCKER_CONFIG_JSON" > "$target/config.json"
+        printf '%s' "$HARBOR_CA_PEM" > "$target/ca.crt"
+        test -s "$target/config.json"
+        test -s "$target/ca.crt"
+        if [[ -s /etc/ssl/certs/ca-certificates.crt ]]; then
+          cat /etc/ssl/certs/ca-certificates.crt "$target/ca.crt" > "$target/ca-bundle.crt"
+        else
+          cp "$target/ca.crt" "$target/ca-bundle.crt"
+        fi
+        {
+          echo "DOCKER_CONFIG=$target"
+          echo "SSL_CERT_FILE=$target/ca-bundle.crt"
+          echo "CI_REGISTRY_CA_FILE=$target/ca.crt"
+        } >> "$GITHUB_ENV"

@@ -13,11 +13,14 @@ from .gitops import sync_snapshot, promote_snapshot, rollback_snapshot
 from .build import build_service, discard_previous, delete_previous, restore_previous, prewarm_base_images, image_digest, verify_builder
 from .argocd import terminate_operations, wait_applications, wait_targets
 from .smoke import run as run_smoke, run_kubernetes
-from .github import create_and_push_tag, create_release, fast_forward_main, set_commit_status
+from .github import candidate_cleanup_allowed, create_and_push_tag, create_release, fast_forward_main, set_commit_status
 from .release import render_aggregate_release, strip_release_version_heading, summarize_release_with_deepseek, summarize_with_deepseek
 from .versions import aggregate_release_tag, fetch_release_tags, next_patch, read_version, service_tag
 from .charts import ChartError, check_charts, format_result, mirror_charts
 from .harbor import HarborClient, ImageRef
+from .artifact_cache import cache_prune, restore as restore_artifact, restore_pattern
+from .maintenance import MaintenanceError, prune_candidates
+from .cache_maintenance import CacheMaintenanceError, prune_cache
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,6 +84,18 @@ def main(argv: list[str] | None = None) -> int:
     candidate_promote.add_argument("--tag", required=True)
     candidate_promote.add_argument("--repo", default=".")
 
+    candidate_restore = subparsers.add_parser("restore-candidate")
+    candidate_restore.add_argument("--config", default=None)
+    candidate_restore.add_argument("--service", required=True)
+    candidate_restore.add_argument("--tag", required=True)
+    candidate_restore.add_argument("--digest", required=True)
+
+    candidate_prune = subparsers.add_parser("prune-candidates")
+    candidate_prune.add_argument("--config", default=None)
+    candidate_prune.add_argument("--max-age-hours", type=int, default=72)
+    candidate_prune.add_argument("--protected-digest", action="append", default=[])
+    candidate_prune.add_argument("--dry-run", action="store_true")
+
     argo = subparsers.add_parser("argo-wait")
     argo.add_argument("--config", default=None)
     argo.add_argument("--revision", required=True)
@@ -135,9 +150,39 @@ def main(argv: list[str] | None = None) -> int:
     charts_mirror.add_argument("--manifest", required=True)
     charts_mirror.add_argument("--root", default=".")
 
+    artifact_cache = subparsers.add_parser("artifact-cache")
+    artifact_cache_subparsers = artifact_cache.add_subparsers(dest="artifact_cache_command", required=True)
+    artifact_restore = artifact_cache_subparsers.add_parser("restore")
+    artifact_restore_group = artifact_restore.add_mutually_exclusive_group(required=True)
+    artifact_restore_group.add_argument("--name")
+    artifact_restore_group.add_argument("--pattern")
+    artifact_restore.add_argument("--destination", default=".")
+    artifact_prune = artifact_cache_subparsers.add_parser("prune")
+    artifact_prune.add_argument("--max-age-hours", type=int, default=72)
+    artifact_prune.add_argument("--dry-run", action="store_true")
+
+    cache_cleanup = subparsers.add_parser("cache-prune")
+    cache_cleanup.add_argument("--root", default="/cache")
+    cache_cleanup.add_argument("--dry-run", action="store_true")
+
     args = parser.parse_args(argv)
     try:
-        if args.command == "validate":
+        if args.command == "cache-prune":
+            removed = prune_cache(args.root, dry_run=args.dry_run)
+            print(json.dumps({"removed": removed, "dry_run": args.dry_run}, sort_keys=True))
+        elif args.command == "artifact-cache":
+            if args.artifact_cache_command == "restore":
+                if args.name:
+                    result = restore_artifact(args.name, args.destination)
+                else:
+                    result = restore_pattern(args.pattern, args.destination)
+                print(json.dumps(result, sort_keys=True))
+            else:
+                if args.max_age_hours < 1:
+                    raise ConfigError("--max-age-hours must be positive")
+                removed = cache_prune(max_age_seconds=args.max_age_hours * 3600, dry_run=args.dry_run)
+                print(json.dumps({"removed": removed, "dry_run": args.dry_run}, sort_keys=True))
+        elif args.command == "validate":
             config = load_config(args.config)
             print(json.dumps({"project": config.project, "services": [service.name for service in config.services]}, sort_keys=True))
         elif args.command == "changes":
@@ -227,7 +272,12 @@ def main(argv: list[str] | None = None) -> int:
             service = next((item for item in config.services if item.name == args.service), None)
             if service is None:
                 raise ConfigError(f"unknown service: {args.service}")
-            HarborClient(config.harbor_registry).delete_tag(ImageRef.parse(f"{service.image_repository}:{args.tag}"))
+            allowed, message = candidate_cleanup_allowed()
+            if not allowed:
+                print(message, file=sys.stderr)
+                print(json.dumps({"service": service.name, "tag": args.tag, "cleaned": False, "skipped": True}, sort_keys=True))
+            else:
+                HarborClient(config.harbor_registry).delete_tag(ImageRef.parse(f"{service.image_repository}:{args.tag}"))
         elif args.command == "promote-candidate":
             config = load_config(args.config)
             service = next((item for item in config.services if item.name == args.service), None)
@@ -237,6 +287,26 @@ def main(argv: list[str] | None = None) -> int:
             destination = ImageRef.parse(f"{service.image_repository}:{config.active_image_tag}")
             digest = HarborClient(config.harbor_registry).promote_tag(source, destination)
             print(json.dumps({"service": service.name, "tag": args.tag, "active_tag": destination.tag, "digest": digest}, sort_keys=True))
+        elif args.command == "restore-candidate":
+            config = load_config(args.config)
+            service = next((item for item in config.services if item.name == args.service), None)
+            if service is None:
+                raise ConfigError(f"unknown service: {args.service}")
+            image = ImageRef(config.harbor_registry, service.image_repository, args.tag)
+            HarborClient(config.harbor_registry).tag_digest(image, args.digest)
+            actual = HarborClient(config.harbor_registry).manifest_digest(image)
+            if actual != args.digest:
+                raise MaintenanceError(f"candidate tag restore verification failed for {image.tag_ref}")
+            print(json.dumps({"service": service.name, "tag": args.tag, "digest": actual}, sort_keys=True))
+        elif args.command == "prune-candidates":
+            config = load_config(args.config)
+            result = prune_candidates(
+                config,
+                max_age_hours=args.max_age_hours,
+                protected_digests=set(args.protected_digest),
+                dry_run=args.dry_run,
+            )
+            print(json.dumps({"candidates": result, "dry_run": args.dry_run}, sort_keys=True))
         elif args.command == "argo-wait":
             config = load_config(args.config)
             if not config.argocd_server:

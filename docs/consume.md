@@ -62,7 +62,12 @@ push dev
    proxy，否则执行配置里的 `smoke_command` 和 `smoke_env`。
 7. 冒烟成功后，即使后续 Harbor promotion 或 Release 步骤失败，也不要回滚
    已验证的 GitOps snapshot，以便安全重试。只有候选已成功提升为 active tag
-   才由 cleanup job 回收；promotion 失败时保留候选 tag，避免 digest 被垃圾回收。
+   才由 cleanup job 回收；Argo 等待、smoke 或 promotion 失败时必须保留候选
+   tag，避免 digest 被垃圾回收，也避免 `gh run rerun --failed` 找不到源镜像。
+   GitHub 重跑不会取消上一 attempt 仍在执行的 job；`cleanup-candidate` 若发现
+   当前 `GITHUB_RUN_ATTEMPT` 小于该 run 的最新 attempt，或 GitHub API 查询失败，
+   必须跳过删除。候选 tag 继续按源 commit 命名（`sha-<GITHUB_SHA>`），重试通过
+   `--reuse-existing` 复用同一 tag。
 
 ## Runner 与密钥边界
 
@@ -139,7 +144,7 @@ values、namespace、Secret、专用 CI 节点和 chart mirror 的职责划分�
 
 ```yaml
 env:
-  CI_IMAGE: harbor.happyladysauce.local/knowledge-core/ci-templates:v1.1.12@sha256:...
+  CI_IMAGE: harbor.happyladysauce.local/knowledge-core/ci-templates:v1.1.13@sha256:...
 ```
 
 本仓库 `ci-templates-publish` 成功后会在 job summary 打出 `image@digest`。未 pin
@@ -149,7 +154,7 @@ digest 的可变 tag 不得用于那种非 ARC 的生产调用。
 
 迁移任务看板前，CI 成败在 `pipeline.yml` / `publish.yml` / Skill-Constructor
 `ci.yml` **末尾 job** 发飞书（`if: always()`）。CI 卡 header 为
-`CICD：<owner/repository>`，commit 标题显示在正文首行；Workflow、Conclusion、
+任务标题使用仓库 basename（例如 `Knowledge-Core`），commit 标题显示在正文首行；Workflow、Conclusion、
 Branch 等信息使用飞书 Markdown 原生列点。卡片带耗时和 run 链接，**不列
 Artifacts**；有 `DEEPSEEK_API_KEY` 时加一句中文问候。
 DeepSeek 请求最多重试 3 次；密钥缺失、超时、空响应或失败时记录 warning，
@@ -185,7 +190,7 @@ DeepSeek 请求最多重试 3 次；密钥缺失、超时、空响应或失败�
 管理员还需为保存 GitHub login 的通讯录自定义字段启用“允许开放平台 API
 调用”。字段类型只能是 TEXT 或 HREF，值支持 `login`、`@login`、
 `https://github.com/login`。同步器只读取目标群成员并按 login 精确匹配，将本次
-提交贡献者设为任务关注人；无匹配时回退触发者。人工添加的关注人不会删除。
+所有匹配到的群内人类提交贡献者设为任务负责人；无匹配时回退触发者。机器人、群外用户和人工添加的负责人/关注人不会被删除。
 
 组织 Actions 配置如下，不要把值提交进 git：
 
@@ -198,7 +203,7 @@ DeepSeek 请求最多重试 3 次；密钥缺失、超时、空响应或失败�
 | `DEEPSEEK_API_KEY` | Secret | 终态任务提示语；失败时有固定回退文案 |
 
 清单名默认是 `CICD 流水线`，目标群以 editor 身份加入清单。任务 `extra` 保存
-同步游标和自动关注人集合；任务更新总是最后写游标，确保中途 API 失败后可重试。
+同步游标和自动负责人集合；任务更新总是最后写游标，确保中途 API 失败后可重试。
 
 ### 机器人与密钥
 

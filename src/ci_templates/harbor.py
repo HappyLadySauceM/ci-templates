@@ -8,6 +8,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from pathlib import Path
+from typing import Any
+
+from .transport import request_with_retry
 
 
 class HarborError(RuntimeError):
@@ -89,9 +92,15 @@ class HarborClient:
             payload = json.dumps(body).encode()
         request = Request(f"https://{self.registry}{path}", data=payload, headers=headers, method=method)
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            response_context = request_with_retry(
+                urlopen,
+                request,
+                timeout=self.timeout,
+                allow_write_retry=method.upper() == "DELETE",
+            )
+            with response_context as response:
                 return response.status, response.headers, response.read()
-        except (HTTPError, URLError) as exc:
+        except (HTTPError, URLError, TimeoutError, ConnectionError) as exc:
             raise HarborError(f"Harbor {method} {path} failed: {exc}") from exc
 
     def manifest_digest(self, image: ImageRef) -> str | None:
@@ -114,6 +123,66 @@ class HarborClient:
             return
         repo_path = quote(repository, safe="")
         self._request("DELETE", f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(digest, safe='')}/tags/{quote(image.tag, safe='')}")
+
+    def list_candidate_tags(self, project: str, *, prefix: str = "sha-", page_size: int = 100) -> list[dict[str, Any]]:
+        """List candidate tags with their push time and manifest digest."""
+
+        results: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            status, _, payload = self._request(
+                "GET",
+                f"/api/v2.0/projects/{quote(project, safe='')}/repositories?page={page}&page_size={page_size}",
+            )
+            repositories = json.loads(payload or b"[]")
+            if not isinstance(repositories, list) or not repositories:
+                break
+            for repository in repositories:
+                repository_name = str(repository.get("name") or "")
+                if "/" in repository_name:
+                    repository_name = repository_name.split("/", 1)[1]
+                if not repository_name:
+                    continue
+                artifact_page = 1
+                while True:
+                    _, _, artifact_payload = self._request(
+                        "GET",
+                        f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{quote(repository_name, safe='')}/artifacts?with_tag=true&page={artifact_page}&page_size={page_size}",
+                    )
+                    artifacts = json.loads(artifact_payload or b"[]")
+                    if not isinstance(artifacts, list) or not artifacts:
+                        break
+                    for artifact in artifacts:
+                        digest = str(artifact.get("digest") or "")
+                        for tag in artifact.get("tags") or []:
+                            name = str(tag.get("name") or "")
+                            if name.startswith(prefix):
+                                results.append({
+                                    "repository": repository_name,
+                                    "tag": name,
+                                    "digest": digest,
+                                    "push_time": str(tag.get("push_time") or artifact.get("push_time") or ""),
+                                })
+                    if len(artifacts) < page_size:
+                        break
+                    artifact_page += 1
+            if len(repositories) < page_size:
+                break
+            page += 1
+        return results
+
+    def tag_digest(self, image: ImageRef, digest: str) -> None:
+        """Attach a tag to an existing manifest; safe to repeat after a 409."""
+
+        project, repository = image.repository.split("/", 1)
+        repo_path = quote(repository, safe="")
+        status, _, payload = self._request(
+            "POST",
+            f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(digest, safe='')}/tags",
+            body={"name": image.tag},
+        )
+        if status not in {200, 201, 409}:
+            raise HarborError(f"Harbor tag restore failed for {image.tag_ref}: HTTP {status} {payload[:200]!r}")
 
     def promote_tag(self, source: ImageRef, destination: ImageRef) -> str:
         """Move a candidate tag to the active tag without pulling the image.

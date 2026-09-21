@@ -60,7 +60,7 @@ environment；不写入 workflow、日志、artifact 或 Release 正文。
 流水线状态可通过独立的 `workflow_run` 监听同步到统一飞书任务清单。监听运行在
 GitHub 托管 runner，与 ARC 故障域隔离；一个项目主流水线复用一个任务，通过
 `未触发`、`执行中`、`执行完毕`、`执行出错` 四个分组展示当前状态。本次提交
-贡献者按飞书通讯录 GitHub 自定义字段匹配，并作为任务关注人。
+贡献者按飞书通讯录 GitHub 自定义字段匹配，并作为任务负责人。
 
 应用权限、Secret/Variable、接入 workflow、初始化、切换、回滚与排障见
 [飞书 CICD 任务看板](feishu-task-board.md)。

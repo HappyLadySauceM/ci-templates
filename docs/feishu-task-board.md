@@ -12,11 +12,12 @@ GitHub 主流水线
   └─ notify（ubuntu-latest）→ 执行完毕 / 执行出错
        ├─ GitHub API：本次提交、失败 job 与贡献者
        ├─ 飞书通讯录：群成员 + GitHub 自定义字段
-       └─ 飞书 Task V2：清单、分组、任务、关注人
+       └─ 飞书 Task V2：清单、分组、任务、负责人
 ```
 
-每个仓库的主流水线对应一个长期复用的任务，标题固定为
-`CICD：<owner/repository>`。任务保持未完成，状态由它在统一清单
+每个仓库的主流水线对应一个长期复用的任务，标题使用仓库 basename，例如
+`Knowledge-Core` 或 `Knowledge-Core-Web`。任务通过 `extra.repository` 与
+`extra.workflow` 唯一匹配（因此旧的 `CICD：<owner/repository>` 任务会原地改名），保持未完成，状态由它在统一清单
 `CICD 流水线` 中所在的自定义分组表示：
 
 | GitHub 事件或结论 | 飞书分组 |
@@ -50,9 +51,10 @@ GitHub 主流水线
    若对应多个群成员，同步器会拒绝自动关联，避免提醒错误的人。
 
 自定义字段列表接口只返回字段定义。同步器先分页获取目标群成员，再按 50 人一批
-读取用户 `custom_attrs`，因此只会关联当前群内成员。匹配成功者作为任务
-`follower`（关注人）；这是 Task API 的原生通知机制，不是在普通字符串描述中
-伪造 `@`。每次只移除同步器上次自动添加的关注人，人工关注人保持不变。
+读取用户 `custom_attrs`，因此只会关联当前群内成员。匹配成功的全部人类贡献者作为任务
+`assignee`（负责人）；机器人和群外用户不会加入。没有匹配贡献者时回退到运行发起人。
+同步器在 `extra.managed_assignees` 中记录自己管理的负责人，同时平滑迁移旧的
+`managed_followers`；每次只移除同步器上次自动添加的成员，人工添加的负责人和关注人保持不变。
 
 ## GitHub 配置
 
@@ -126,7 +128,7 @@ jobs:
 5. 在飞书确认任务标题、清单共享范围和四个分组后，将
    `FEISHU_TASK_TRACKER_ENABLED` 设为 `true`。
 6. 触发一次成功流水线，再验证一次失败或取消、失败重跑成功。确认状态依次进入
-   执行中、终态，并且贡献者关注人正确更新。
+   执行中、终态，并且贡献者负责人正确更新。
 7. Core 试点稳定后，按 Knowledge-Core-Web、ci-templates、Skill-Constructor
    顺序接入；每个仓库先 provision，再启用。
 
