@@ -197,11 +197,31 @@ def restore_pattern(pattern: str, destination: str) -> list[dict[str, object]]:
     pattern = pattern.strip()
     if not pattern or any(part in {"", ".", ".."} for part in pattern.split("/")):
         raise ArtifactCacheError("artifact pattern must be non-empty and relative")
-    matches = [item for item in _artifact_listing() if fnmatch.fnmatch(str(item.get("name") or ""), pattern)]
-    if not matches:
+    cached_names: dict[str, dict] = {}
+    cache_dir = _root() / _metadata()[1] / _metadata()[2]
+    if cache_dir.is_dir():
+        for entry in cache_dir.iterdir():
+            if entry.is_dir() and fnmatch.fnmatch(entry.name, pattern):
+                cached = _read_cached(entry.name)
+                if cached is not None:
+                    cached_names[entry.name] = cached[1]
+    try:
+        remote_matches = [
+            item for item in _artifact_listing()
+            if fnmatch.fnmatch(str(item.get("name") or ""), pattern)
+        ]
+    except (ArtifactCacheError, GitHubError):
+        # A complete, digest-validated local set is a safe offline fallback.
+        # Do not silently use it when the cache is incomplete.
+        if not cached_names:
+            raise
+        remote_matches = []
+    matches_by_name = {str(item.get("name") or ""): item for item in remote_matches}
+    matches_by_name.update({name: {"name": name, "id": info.get("artifact_id", "")} for name, info in cached_names.items()})
+    if not matches_by_name:
         raise ArtifactCacheError(f"GitHub artifacts do not match pattern: {pattern}")
     results: list[dict[str, object]] = []
-    for item in sorted(matches, key=lambda value: str(value.get("name") or "")):
+    for item in sorted(matches_by_name.values(), key=lambda value: str(value.get("name") or "")):
         name = _validate_name(str(item.get("name") or ""))
         cached = _read_cached(name)
         source = "cache"
