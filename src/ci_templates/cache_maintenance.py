@@ -53,15 +53,45 @@ def prune_cache(
     if now is None:
         now = time.time()
     removed: list[str] = []
+    removed_paths: set[Path] = set()
+    reclaimed_bytes = 0
+
+    def disk_state() -> tuple[float, int, int]:
+        stats = os.statvfs(cache_root)
+        capacity = max(1, stats.f_blocks * stats.f_frsize)
+        available = stats.f_bavail * stats.f_frsize
+        usage = 1.0 - (available / capacity)
+        return usage, available, capacity
+
+    def projected_usage() -> float:
+        usage, available, capacity = disk_state()
+        return 1.0 - min(capacity, available + reclaimed_bytes) / capacity
+
+    def mark_for_removal(path: Path) -> None:
+        nonlocal reclaimed_bytes
+        if path in removed_paths:
+            return
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        removed_paths.add(path)
+        reclaimed_bytes += size
+        removed.append(str(path.relative_to(cache_root)))
+        if not dry_run:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
     with _lock(cache_root):
-        usage = 1.0 - (os.statvfs(cache_root).f_bavail / max(1, os.statvfs(cache_root).f_blocks))
         for name, max_age in _CACHE_DIRS.items():
             directory = cache_root / name
             if not directory.is_dir():
                 continue
             # Run retention cleanup for ephemeral run artifacts every time. For
             # package/tool caches wait for pressure so a warm cache remains useful.
-            if name != "artifacts" and usage < high_watermark:
+            if name != "artifacts" and projected_usage() < high_watermark:
                 continue
             cutoff = now - max_age
             candidates = []
@@ -73,13 +103,7 @@ def prune_cache(
                 if path.is_file() and stat.st_mtime < cutoff:
                     candidates.append((stat.st_mtime, path))
             for _, path in sorted(candidates):
-                relative = str(path.relative_to(cache_root))
-                removed.append(relative)
-                if not dry_run:
-                    try:
-                        path.unlink()
-                    except FileNotFoundError:
-                        pass
+                mark_for_removal(path)
             if not dry_run:
                 for path in sorted(directory.rglob("*"), reverse=True):
                     if path.is_dir():
@@ -87,8 +111,28 @@ def prune_cache(
                             path.rmdir()
                         except OSError:
                             pass
-            if not dry_run:
-                usage = 1.0 - (os.statvfs(cache_root).f_bavail / max(1, os.statvfs(cache_root).f_blocks))
-                if usage <= low_watermark:
+
+        # Retention cleanup is deliberately followed by an LRU pass under
+        # pressure.  Fresh package/tool entries may still be evicted to bring
+        # the node back to the low watermark; run artifacts remain protected
+        # for their explicit 72-hour retention window.
+        if projected_usage() > high_watermark:
+            pressure_candidates: list[tuple[float, float, Path]] = []
+            for name in _CACHE_DIRS:
+                if name == "artifacts":
+                    continue
+                directory = cache_root / name
+                if not directory.is_dir():
+                    continue
+                for path in directory.rglob("*"):
+                    try:
+                        stat = path.stat()
+                    except OSError:
+                        continue
+                    if path.is_file() and path not in removed_paths:
+                        pressure_candidates.append((stat.st_atime, stat.st_mtime, path))
+            for _, _, path in sorted(pressure_candidates):
+                mark_for_removal(path)
+                if projected_usage() <= low_watermark:
                     break
     return removed

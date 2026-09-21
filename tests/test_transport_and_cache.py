@@ -9,6 +9,7 @@ from urllib.request import Request
 from zipfile import ZipFile
 
 from ci_templates.artifact_cache import ArtifactCacheError, restore
+from ci_templates.cache_maintenance import prune_cache
 from ci_templates.maintenance import MaintenanceError, prune_candidates
 from ci_templates.transport import RetryPolicy, backoff_seconds, request_with_retry
 from test_ci_templates import config
@@ -114,6 +115,22 @@ class MaintenanceTest(unittest.TestCase):
         with patch("ci_templates.maintenance._active_commit_shas", side_effect=MaintenanceError("unavailable")):
             with self.assertRaises(MaintenanceError):
                 prune_candidates(config(), harbor_factory=lambda _: self.fail("harbor must not be touched"))
+
+    @patch("ci_templates.cache_maintenance.os.statvfs")
+    def test_cache_pressure_evicts_oldest_dependency_entries_to_low_watermark(self, statvfs):
+        statvfs.return_value = type("Stats", (), {"f_blocks": 100, "f_bavail": 10, "f_frsize": 1})()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "cache"
+            newest = root / "npm" / "newest.tgz"
+            oldest = root / "npm" / "oldest.tgz"
+            newest.parent.mkdir(parents=True)
+            newest.write_bytes(b"new")
+            oldest.write_bytes(b"old")
+            os.utime(oldest, (98, 98))
+            os.utime(newest, (99, 99))
+            removed = prune_cache(str(root), dry_run=True, now=100)
+            self.assertIn("npm/oldest.tgz", removed)
+            self.assertIn("npm/newest.tgz", removed)
 
 
 if __name__ == "__main__":
