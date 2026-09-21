@@ -292,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
             service = next((item for item in config.services if item.name == args.service), None)
             if service is None:
                 raise ConfigError(f"unknown service: {args.service}")
-            image = ImageRef(config.harbor_registry, service.image_repository, args.tag)
+            image = ImageRef.parse(f"{service.image_repository}:{args.tag}")
             HarborClient(config.harbor_registry).tag_digest(image, args.digest)
             actual = HarborClient(config.harbor_registry).manifest_digest(image)
             if actual != args.digest:
