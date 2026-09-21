@@ -15,12 +15,22 @@ class CacheMaintenanceError(RuntimeError):
 
 _CACHE_DIRS = {
     "artifacts": 72 * 3600,
+    # Project-local same-node artifact caches used by older pipelines. Keep
+    # them under the same retention and protection rules as the shared cache.
+    "knowledge-core/artifacts": 72 * 3600,
+    "knowledge-core-web/artifacts": 72 * 3600,
     "cargo": 30 * 24 * 3600,
     "go": 30 * 24 * 3600,
     "npm": 30 * 24 * 3600,
     "pnpm": 30 * 24 * 3600,
     "playwright": 30 * 24 * 3600,
     "actions-tools": 30 * 24 * 3600,
+}
+
+_ARTIFACT_CACHE_DIRS = {
+    "artifacts",
+    "knowledge-core/artifacts",
+    "knowledge-core-web/artifacts",
 }
 
 
@@ -91,7 +101,7 @@ def prune_cache(
                 continue
             # Run retention cleanup for ephemeral run artifacts every time. For
             # package/tool caches wait for pressure so a warm cache remains useful.
-            if name != "artifacts" and projected_usage() < high_watermark:
+            if name not in _ARTIFACT_CACHE_DIRS and projected_usage() < high_watermark:
                 continue
             cutoff = now - max_age
             candidates = []
@@ -119,7 +129,7 @@ def prune_cache(
         if projected_usage() > high_watermark:
             pressure_candidates: list[tuple[float, float, Path]] = []
             for name in _CACHE_DIRS:
-                if name == "artifacts":
+                if name in _ARTIFACT_CACHE_DIRS:
                     continue
                 directory = cache_root / name
                 if not directory.is_dir():

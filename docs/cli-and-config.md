@@ -20,7 +20,7 @@
 | `prune-candidates` | `--max-age-hours`、`--protected-digest`、`--dry-run` | 失败候选安全清理；默认保留 72 小时，GitHub/Harbor 查询失败时 fail closed |
 | `artifact-cache restore` | `--name` 或 `--pattern`、`--destination` | 从校验过的节点缓存恢复制品，未命中时以退避重试从 GitHub 下载并原子缓存 |
 | `artifact-cache prune` | `--max-age-hours`、`--dry-run` | 清理过期制品缓存；默认保留 72 小时 |
-| `cache-prune` | `--root`、`--dry-run` | 在显式 `/cache` 子目录内按水位清理依赖/工具缓存 |
+| `cache-prune` | `--root`、`--dry-run` | 在显式 `/cache` 子目录内按水位清理依赖/工具缓存，并保留共享及 Core/Web 项目制品缓存 72 小时 |
 | `cleanup-previous` | `--service` | 确认后删除 Harbor `:previous` |
 | `restore-previous` | `--service` | 从 `:previous` 恢复 `:dev` |
 | `argo-wait` | `--revision`、`--services`（逗号分隔）、`--timeout` | 等待 Application Synced + Healthy，并可匹配期望 digest；明确失败时 fail-fast 并打印诊断 |
