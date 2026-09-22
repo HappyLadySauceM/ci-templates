@@ -8,13 +8,32 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 from .transport import request_with_retry
 
 
 class HarborError(RuntimeError):
     pass
+
+
+class HarborHTTPError(HarborError):
+    def __init__(self, method: str, path: str, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"Harbor {method} {path} failed: HTTP {status_code}")
+
+
+class HarborTransportError(HarborError):
+    pass
+
+
+class HarborDigestConflict(HarborError):
+    def __init__(self, image: "ImageRef", expected: str, actual: str):
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"digest-conflict for {image.tag_ref}: expected {expected}, found {actual}"
+        )
 
 
 # Active tags such as :dev are often a manifest list/index, not a single image
@@ -81,7 +100,15 @@ class HarborClient:
                 return "", ""
         return "", ""
 
-    def _request(self, method: str, path: str, *, body: object | None = None, accept: str = "application/json"):
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: object | None = None,
+        accept: str = "application/json",
+        accepted_statuses: Collection[int] = (),
+    ):
         headers = {"Accept": accept}
         if self.username:
             token = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
@@ -96,33 +123,68 @@ class HarborClient:
                 urlopen,
                 request,
                 timeout=self.timeout,
-                allow_write_retry=method.upper() == "DELETE",
+                allow_write_retry=False,
             )
             with response_context as response:
                 return response.status, response.headers, response.read()
-        except (HTTPError, URLError, TimeoutError, ConnectionError) as exc:
-            raise HarborError(f"Harbor {method} {path} failed: {exc}") from exc
+        except HTTPError as exc:
+            try:
+                if exc.code in accepted_statuses:
+                    return exc.code, exc.headers, exc.read()
+            finally:
+                exc.close()
+            raise HarborHTTPError(method, path, exc.code) from exc
+        except (URLError, TimeoutError, ConnectionError) as exc:
+            raise HarborTransportError(f"Harbor {method} {path} failed: {exc}") from exc
 
     def manifest_digest(self, image: ImageRef) -> str | None:
         path = f"/v2/{image.repository}/manifests/{quote(image.tag, safe='') }"
-        try:
-            _, headers, _ = self._request("HEAD", path, accept=_MANIFEST_ACCEPT)
-        except HarborError as exc:
-            if "HTTP Error 404" in str(exc):
-                return None
-            raise
-        return headers.get("Docker-Content-Digest")
+        status, headers, _ = self._request(
+            "HEAD", path, accept=_MANIFEST_ACCEPT, accepted_statuses={404}
+        )
+        if status == 404:
+            return None
+        digest = headers.get("Docker-Content-Digest")
+        if not digest:
+            raise HarborError(f"Harbor manifest response omitted digest for {image.tag_ref}")
+        return digest
 
-    def delete_tag(self, image: ImageRef) -> None:
+    def delete_tag(self, image: ImageRef, *, expected_digest: str | None = None) -> str:
         parts = image.repository.split("/", 1)
         if len(parts) != 2:
             raise HarborError("repository must be project/name for tag deletion")
         project, repository = parts
         digest = self.manifest_digest(image)
         if not digest:
-            return
+            return "already-absent"
+        if expected_digest is not None and digest != expected_digest:
+            return "changed"
         repo_path = quote(repository, safe="")
-        self._request("DELETE", f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(digest, safe='')}/tags/{quote(image.tag, safe='')}")
+        path = f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(digest, safe='')}/tags/{quote(image.tag, safe='')}"
+        try:
+            status, _, _ = self._request("DELETE", path, accepted_statuses={404})
+        except (HarborTransportError, HarborHTTPError) as exc:
+            if isinstance(exc, HarborHTTPError) and exc.status_code < 500:
+                raise
+            # DELETE may have succeeded even if the response was lost. Confirm
+            # the post-condition before reporting an uncertain write failure.
+            try:
+                current = self.manifest_digest(image)
+            except HarborError as read_exc:
+                raise exc from read_exc
+            if current is None:
+                return "reconciled-after-delete"
+            if current != digest:
+                return "changed"
+            raise
+        if status == 404:
+            current = self.manifest_digest(image)
+            if current is None:
+                return "already-absent"
+            if current != digest:
+                return "changed"
+            raise HarborHTTPError("DELETE", path, 404)
+        return "deleted"
 
     def list_candidate_tags(self, project: str, *, prefix: str = "sha-", page_size: int = 100) -> list[dict[str, Any]]:
         """List candidate tags with their push time and manifest digest."""
@@ -171,18 +233,50 @@ class HarborClient:
             page += 1
         return results
 
-    def tag_digest(self, image: ImageRef, digest: str) -> None:
-        """Attach a tag to an existing manifest; safe to repeat after a 409."""
+    def tag_digest(self, image: ImageRef, digest: str) -> str:
+        """Attach a tag only when absent or already pointing at ``digest``."""
 
         project, repository = image.repository.split("/", 1)
         repo_path = quote(repository, safe="")
-        status, _, payload = self._request(
-            "POST",
-            f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(digest, safe='')}/tags",
-            body={"name": image.tag},
-        )
-        if status not in {200, 201, 409}:
-            raise HarborError(f"Harbor tag restore failed for {image.tag_ref}: HTTP {status} {payload[:200]!r}")
+        current = self.manifest_digest(image)
+        if current == digest:
+            return "already-present"
+        if current is not None:
+            raise HarborDigestConflict(image, digest, current)
+
+        path = f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(digest, safe='')}/tags"
+        try:
+            status, _, _ = self._request(
+                "POST", path, body={"name": image.tag}, accepted_statuses={409}
+            )
+        except HarborTransportError as exc:
+            return self._reconcile_tag_write(image, digest, exc)
+        except HarborHTTPError as exc:
+            if exc.status_code in {408, 425, 429} or exc.status_code >= 500:
+                return self._reconcile_tag_write(image, digest, exc)
+            raise
+
+        if status == 409:
+            return self._reconcile_tag_write(
+                image, digest, HarborHTTPError("POST", path, 409)
+            )
+        actual = self.manifest_digest(image)
+        if actual == digest:
+            return "created"
+        if actual is not None:
+            raise HarborDigestConflict(image, digest, actual)
+        raise HarborError(f"candidate tag creation was not visible for {image.tag_ref}")
+
+    def _reconcile_tag_write(self, image: ImageRef, digest: str, error: HarborError) -> str:
+        try:
+            actual = self.manifest_digest(image)
+        except HarborError as read_exc:
+            raise error from read_exc
+        if actual == digest:
+            return "reconciled-after-conflict"
+        if actual is not None:
+            raise HarborDigestConflict(image, digest, actual) from error
+        raise error
 
     def promote_tag(self, source: ImageRef, destination: ImageRef) -> str:
         """Move a candidate tag to the active tag without pulling the image.
@@ -200,33 +294,30 @@ class HarborClient:
         if existing == digest:
             return digest
         if existing:
-            self.delete_tag(destination)
-        parts = destination.repository.split("/", 1)
-        if len(parts) != 2:
-            raise HarborError("repository must be project/name for tag promotion")
-        project, repository = parts
-        repo_path = quote(repository, safe="")
+            self.delete_tag(destination, expected_digest=existing)
+            after_delete = self.manifest_digest(destination)
+            if after_delete == digest:
+                return digest
+            if after_delete is not None:
+                raise HarborDigestConflict(destination, digest, after_delete)
         try:
-            self._request(
-                "POST",
-                f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(digest, safe='')}/tags",
-                body={"name": destination.tag},
-            )
-            promoted = self.manifest_digest(destination)
-            if promoted != digest:
-                raise HarborError(f"Harbor promotion verification failed for {destination.tag_ref}")
-        except HarborError:
-            # Deleting an existing active tag is the one non-idempotent step.
-            # If the new tag cannot be attached, restore the old reference so
-            # a transient Harbor/API failure cannot leave the service without
-            # its last known-good active image.
+            self.tag_digest(destination, digest)
+        except HarborError as promotion_error:
+            # Reconcile first: another runner may have completed this
+            # promotion while this request was in flight.
+            try:
+                current = self.manifest_digest(destination)
+            except HarborError as read_exc:
+                raise promotion_error from read_exc
+            if current == digest:
+                return digest
+            if current is not None:
+                raise HarborDigestConflict(destination, digest, current) from promotion_error
+            # Restore the previous active reference only if the destination is
+            # still absent. Never overwrite a tag another runner has created.
             if existing:
                 try:
-                    self._request(
-                        "POST",
-                        f"/api/v2.0/projects/{quote(project, safe='')}/repositories/{repo_path}/artifacts/{quote(existing, safe='')}/tags",
-                        body={"name": destination.tag},
-                    )
+                    self.tag_digest(destination, existing)
                 except HarborError as restore_exc:
                     raise HarborError(
                         f"Harbor promotion failed and restoring {destination.tag_ref} failed"

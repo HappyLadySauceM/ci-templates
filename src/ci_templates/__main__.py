@@ -277,7 +277,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(message, file=sys.stderr)
                 print(json.dumps({"service": service.name, "tag": args.tag, "cleaned": False, "skipped": True}, sort_keys=True))
             else:
-                HarborClient(config.harbor_registry).delete_tag(ImageRef.parse(f"{service.image_repository}:{args.tag}"))
+                outcome = HarborClient(config.harbor_registry).delete_tag(ImageRef.parse(f"{service.image_repository}:{args.tag}"))
+                print(f"candidate tag cleanup: {outcome}", file=sys.stderr)
         elif args.command == "promote-candidate":
             config = load_config(args.config)
             service = next((item for item in config.services if item.name == args.service), None)
@@ -293,11 +294,10 @@ def main(argv: list[str] | None = None) -> int:
             if service is None:
                 raise ConfigError(f"unknown service: {args.service}")
             image = ImageRef.parse(f"{service.image_repository}:{args.tag}")
-            HarborClient(config.harbor_registry).tag_digest(image, args.digest)
-            actual = HarborClient(config.harbor_registry).manifest_digest(image)
-            if actual != args.digest:
-                raise MaintenanceError(f"candidate tag restore verification failed for {image.tag_ref}")
-            print(json.dumps({"service": service.name, "tag": args.tag, "digest": actual}, sort_keys=True))
+            harbor = HarborClient(config.harbor_registry)
+            outcome = harbor.tag_digest(image, args.digest)
+            print(f"candidate tag restore: {outcome}", file=sys.stderr)
+            print(json.dumps({"service": service.name, "tag": args.tag, "digest": args.digest}, sort_keys=True))
         elif args.command == "prune-candidates":
             config = load_config(args.config)
             result = prune_candidates(

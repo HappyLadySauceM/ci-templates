@@ -16,7 +16,7 @@
 | `prewarm` | | 把 `base_images` 预热到 Harbor |
 | `promote-candidate` | `--service`、`--tag` | 通过 Harbor tag API 把候选 manifest 提升为配置的 active tag，不需要 Docker daemon |
 | `cleanup-candidate` | `--service`、`--tag` | 删除 Harbor 候选 tag；当前 GitHub run attempt 已过期或查询失败时跳过删除 |
-| `restore-candidate` | `--service`、`--tag`、`--digest` | 将仍存在的 digest 幂等恢复为候选 tag，并校验 manifest；供失败重跑复用 |
+| `restore-candidate` | `--service`、`--tag`、`--digest` | 将仍存在的 digest 幂等恢复为候选 tag；现有标签需指向同一 digest，否则安全失败；供失败重跑复用 |
 | `prune-candidates` | `--max-age-hours`、`--protected-digest`、`--dry-run` | 失败候选安全清理；默认保留 72 小时，GitHub/Harbor 查询失败时 fail closed |
 | `artifact-cache restore` | `--name` 或 `--pattern`、`--destination` | 从校验过的节点缓存恢复制品，未命中时以退避重试从 GitHub 下载并原子缓存 |
 | `artifact-cache prune` | `--max-age-hours`、`--dry-run` | 清理过期制品缓存；默认保留 72 小时 |

@@ -27,6 +27,7 @@ class CleanupCandidateAttemptTest(unittest.TestCase):
     def test_cleanup_candidate_deletes_when_this_attempt_is_latest(self, load_config, harbor_cls, _request):
         load_config.return_value = config()
         client = harbor_cls.return_value
+        client.delete_tag.return_value = "deleted"
 
         with patch.dict(os.environ, self._github_env("2"), clear=False):
             self.assertEqual(self._run(), 0)
@@ -56,6 +57,7 @@ class CleanupCandidateAttemptTest(unittest.TestCase):
     def test_cleanup_candidate_deletes_when_github_run_env_is_absent(self, load_config, harbor_cls):
         load_config.return_value = config()
         client = harbor_cls.return_value
+        client.delete_tag.return_value = "deleted"
         env = {
             key: value
             for key, value in os.environ.items()
