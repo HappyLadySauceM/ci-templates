@@ -147,6 +147,8 @@ jobs:
             sleep "$attempt"
           done
           [[ "$control_digest" == sha256:* && "$runner_digest" == sha256:* ]]
+          docker run --rm --entrypoint ci-templates "$control_tag" artifact-cache --help >/dev/null
+          docker run --rm --entrypoint ci-templates "$runner_tag" artifact-cache --help >/dev/null
           {
             echo "### Published CI images"
             echo

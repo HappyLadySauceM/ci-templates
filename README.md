@@ -12,6 +12,7 @@ harbor.happyladysauce.local/knowledge-core/ci-templates:vMAJOR.MINOR.PATCH
 
 ARC controller 镜像按 digest pin；runner 镜像使用版本 tag，并要求 Harbor 对该仓库启用不可变 tag。
 `ci-templates-publish` 在推到 `main` 且相关路径变更时，把 `VERSION` 对应的 tag 推到 Harbor；已存在的不可变 tag 会跳过重建。
+CLI 变更必须同时提升 `VERSION` 和 `.ci/pipeline.yaml` 的 `runner_image_tag`，并更新 `deploy/arc` 中两个 Scale Set 的镜像引用。应用流水线里的 ci-templates Action SHA 只固定 Action 源码，不会更新 ARC Runner 镜像内的 CLI；发布流程会执行控制镜像和 Runner 镜像的 CLI 能力冒烟检查。
 
 本控制流**不扫描、不签名**镜像。凭据只放在 runner 或部署 Secret 管理器里；密码、token、私钥不得出现在 JSON、YAML、源码、日志或 Release 正文。发布摘要只消费一份有界、已脱敏的 diff 上下文（临时文件）。commit、分支、workflow 和凭据元数据不会发给 DeepSeek，也不会写入 Release。
 
