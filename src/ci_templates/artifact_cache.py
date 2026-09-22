@@ -150,7 +150,11 @@ def _download_from_github(name: str, *, selected: dict | None = None) -> tuple[P
         raise ArtifactCacheError("GITHUB_TOKEN is required to download artifacts")
     request = Request(
         archive_url,
-        headers={"Accept": "application/zip", "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"},
+        # The archive_download_url is a GitHub REST endpoint which returns a
+        # short-lived 302 to the ZIP. GitHub negotiates that redirect using
+        # its JSON media type; application/zip is not accepted on this API
+        # request and yields HTTP 415 before the archive host is reached.
+        headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"},
         method="GET",
     )
     entry = _entry(name)

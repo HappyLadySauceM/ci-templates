@@ -80,11 +80,22 @@ class ArtifactCacheTest(unittest.TestCase):
                     return archive.read_bytes()
 
             payload = {"artifacts": [{"id": 1, "name": "plan", "expired": False, "archive_download_url": "https://example.test/archive"}]}
+            requests = []
+
+            def open_archive(request, timeout):
+                requests.append((request, timeout))
+                return Response()
+
             with patch.dict(os.environ, environment, clear=False):
-                with patch("ci_templates.artifact_cache._request", return_value=payload), patch("ci_templates.artifact_cache.urlopen", return_value=Response()):
+                with patch("ci_templates.artifact_cache._request", return_value=payload), patch("ci_templates.artifact_cache.urlopen", side_effect=open_archive):
                     destination = Path(directory) / "first"
                     result = restore("plan", str(destination))
                 self.assertEqual(result["source"], "github")
+                self.assertEqual(len(requests), 1)
+                request, timeout = requests[0]
+                self.assertEqual(request.get_header("Accept"), "application/vnd.github+json")
+                self.assertEqual(request.get_header("Authorization"), "Bearer token")
+                self.assertEqual(timeout, 120)
                 self.assertEqual((destination / "changes.json").read_text(), "{}\n")
                 with patch("ci_templates.artifact_cache._request", side_effect=AssertionError("remote should not be used")):
                     result = restore("plan", str(Path(directory) / "second"))
