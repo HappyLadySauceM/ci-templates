@@ -12,7 +12,9 @@ import shutil
 import stat
 import tempfile
 import time
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from urllib.parse import urljoin, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from zipfile import BadZipFile, ZipFile
 
 from .github import GitHubError, _request
@@ -24,6 +26,27 @@ class ArtifactCacheError(RuntimeError):
 
 
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,180}\Z")
+
+
+class _NoAutomaticRedirect(HTTPRedirectHandler):
+    """Keep GitHub credentials on the API request, never on its signed URL."""
+
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
+_GITHUB_API_OPENER = build_opener(_NoAutomaticRedirect())
+
+
+def _open_github_artifact_redirect(request: Request, *, timeout: float) -> object:
+    """Return GitHub's expected 302 as a response instead of forwarding auth."""
+
+    try:
+        return _GITHUB_API_OPENER.open(request, timeout=timeout)
+    except HTTPError as response:
+        if response.code == 302:
+            return response
+        raise
 
 
 def _metadata() -> tuple[str, str, str]:
@@ -157,11 +180,26 @@ def _download_from_github(name: str, *, selected: dict | None = None) -> tuple[P
         headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"},
         method="GET",
     )
+    redirect_context = request_with_retry(_open_github_artifact_redirect, request, timeout=30)
+    with redirect_context as redirect_response:
+        if redirect_response.getcode() != 302:
+            raise ArtifactCacheError("GitHub artifact download did not return a redirect")
+        location = redirect_response.headers.get("Location")
+    if not location:
+        raise ArtifactCacheError("GitHub artifact redirect is missing its download URL")
+    download_url = urljoin(archive_url, location)
+    parsed_download_url = urlsplit(download_url)
+    if parsed_download_url.scheme != "https" or not parsed_download_url.netloc:
+        raise ArtifactCacheError("GitHub artifact redirect URL must use HTTPS")
+    # The Location URL is a short-lived signed URL. Fetch it without the
+    # GitHub bearer token; forwarding that token can make the storage service
+    # reject the signed request and would disclose credentials cross-origin.
+    archive_request = Request(download_url, headers={"Accept": "application/zip"}, method="GET")
     entry = _entry(name)
     entry.mkdir(parents=True, exist_ok=True)
     temporary = entry.parent / f".{entry.name}.zip.tmp"
     try:
-        response_context = request_with_retry(urlopen, request, timeout=120)
+        response_context = request_with_retry(urlopen, archive_request, timeout=120)
         with response_context as response, temporary.open("wb") as stream:
             # ``HTTPResponse`` implements sized reads; a few lightweight
             # clients expose only ``read()``. Keep the streaming path for
