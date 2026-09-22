@@ -104,6 +104,21 @@ jobs:
         run: |
           set -euo pipefail
           expected_runner_image="$RUNNER_IMAGE:$RUNNER_IMAGE_TAG"
+          if [[ -z "${HTTP_PROXY:-}" || -z "${HTTPS_PROXY:-}" ]]; then
+            echo "ARC sing-box HTTP_PROXY and HTTPS_PROXY must be injected into the builder runner" >&2
+            exit 1
+          fi
+          # Docker's predefined proxy build args are not persisted in image
+          # layers/history. Pass values from the ARC-managed sing-box Secret;
+          # never put proxy URLs in this workflow.
+          proxy_build_args=(
+            --build-arg HTTP_PROXY
+            --build-arg HTTPS_PROXY
+            --build-arg NO_PROXY
+            --build-arg http_proxy
+            --build-arg https_proxy
+            --build-arg no_proxy
+          )
           grep -R --fixed-strings -- "image: $expected_runner_image" deploy/arc >/dev/null || {
             echo "ARC values must reference $expected_runner_image" >&2
             exit 1
@@ -127,14 +142,14 @@ jobs:
           }
           control_digest="$(remote_digest "$control_tag")"
           if [[ "$control_digest" != sha256:* ]]; then
-            docker build --network host --tag "$control_tag" .
+            docker build "${proxy_build_args[@]}" --network host --tag "$control_tag" .
             docker push "$control_tag"
           else
             echo "Control image already exists remotely: $control_tag@$control_digest"
           fi
           runner_digest="$(remote_digest "$runner_tag")"
           if [[ "$runner_digest" != sha256:* ]]; then
-            docker build --network host --file runner/Dockerfile \
+            docker build "${proxy_build_args[@]}" --network host --file runner/Dockerfile \
               --build-arg RUNNER_VERSION="$RUNNER_VERSION" --tag "$runner_tag" .
             docker push "$runner_tag"
           else
