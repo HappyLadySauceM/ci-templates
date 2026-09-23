@@ -3,8 +3,8 @@ description: Retry checkout once after cleaning an incomplete worktree
 inputs:
   fetch-depth: { default: "1" }
   ref: { default: "" }
-  repository: { default: ${{ github.repository }} }
-  token: { default: ${{ github.token }} }
+  repository: { default: "${{ github.repository }}" }
+  token: { default: "${{ github.token }}" }
   path: { default: "" }
   fetch-tags: { default: "false" }
   persist-credentials: { default: "true" }
