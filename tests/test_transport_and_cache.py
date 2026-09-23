@@ -13,6 +13,7 @@ from ci_templates.artifact_cache import ArtifactCacheError, restore
 from ci_templates.cache_maintenance import prune_cache
 from ci_templates.maintenance import MaintenanceError, prune_candidates
 from ci_templates.transport import NetworkOperation, RetryPolicy, backoff_seconds, request_with_retry, run_with_retry
+from ci_templates.network_audit import audit_workflows
 from test_ci_templates import config
 
 
@@ -83,6 +84,13 @@ class RetryTest(unittest.TestCase):
         for action in ("checkout-with-retry", "setup-node-with-retry", "setup-go-with-retry"):
             data = (root / action / "action.yml").read_text()
             self.assertNotRegex(data, r"uses: actions/[^@]+@(v|main)")
+
+    def test_network_audit_rejects_direct_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workflows = Path(directory) / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "ci.yml").write_text("steps:\n  - uses: actions/upload-artifact@v4\n")
+            self.assertRegex(audit_workflows(directory)[0], "upload-artifact-with-retry")
 
 
 class ArtifactCacheTest(unittest.TestCase):

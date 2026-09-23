@@ -22,6 +22,7 @@ from .artifact_cache import cache_prune, restore as restore_artifact, restore_pa
 from .maintenance import MaintenanceError, prune_candidates
 from .cache_maintenance import CacheMaintenanceError, prune_cache
 from .transport import NetworkOperation, RetryPolicy, run_with_retry
+from .network_audit import audit_workflows
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -169,10 +170,16 @@ def main(argv: list[str] | None = None) -> int:
     network_run.add_argument("--profile", required=True, choices=("read", "download"))
     network_run.add_argument("--label", required=True)
     network_run.add_argument("command_argv", nargs=argparse.REMAINDER)
+    network_audit = subparsers.add_parser("network-audit")
+    network_audit.add_argument("--root", default=".")
 
     args = parser.parse_args(argv)
     try:
-        if args.command == "network-run":
+        if args.command == "network-audit":
+            failures = audit_workflows(args.root)
+            if failures: raise ConfigError("\n".join(failures))
+            print(json.dumps({"network_audit": "passed", "root": args.root}, sort_keys=True))
+        elif args.command == "network-run":
             command_argv = args.command_argv[1:] if args.command_argv[:1] == ["--"] else args.command_argv
             if not command_argv: raise ConfigError("network-run requires a command after --")
             run_with_retry(command_argv, NetworkOperation(args.profile), RetryPolicy(attempts=int(os.environ.get("CI_DOWNLOAD_RETRY_ATTEMPTS", "5"))), args.label)
