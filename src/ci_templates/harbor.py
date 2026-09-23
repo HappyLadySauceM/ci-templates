@@ -186,20 +186,25 @@ class HarborClient:
             raise HarborHTTPError("DELETE", path, 404)
         return "deleted"
 
-    def list_candidate_tags(self, project: str, *, prefix: str = "sha-", page_size: int = 100) -> list[dict[str, Any]]:
+    def list_candidate_tags(self, project: str, *, repositories: Collection[str] | None = None, prefix: str = "sha-", page_size: int = 100) -> list[dict[str, Any]]:
         """List candidate tags with their push time and manifest digest."""
 
         results: list[dict[str, Any]] = []
+        if repositories is not None:
+            repository_entries = [{"name": f"{project}/{name}"} for name in sorted(set(repositories))]
+            pages = [repository_entries]
+        else:
+            pages = None
         page = 1
         while True:
-            status, _, payload = self._request(
-                "GET",
-                f"/api/v2.0/projects/{quote(project, safe='')}/repositories?page={page}&page_size={page_size}",
-            )
-            repositories = json.loads(payload or b"[]")
-            if not isinstance(repositories, list) or not repositories:
+            if pages is not None:
+                repository_page = pages[page - 1] if page <= len(pages) else []
+            else:
+                _, _, payload = self._request("GET", f"/api/v2.0/projects/{quote(project, safe='')}/repositories?page={page}&page_size={page_size}")
+                repository_page = json.loads(payload or b"[]")
+            if not isinstance(repository_page, list) or not repository_page:
                 break
-            for repository in repositories:
+            for repository in repository_page:
                 repository_name = str(repository.get("name") or "")
                 if "/" in repository_name:
                     repository_name = repository_name.split("/", 1)[1]
@@ -228,7 +233,7 @@ class HarborClient:
                     if len(artifacts) < page_size:
                         break
                     artifact_page += 1
-            if len(repositories) < page_size:
+            if pages is not None or len(repository_page) < page_size:
                 break
             page += 1
         return results

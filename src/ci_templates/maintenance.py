@@ -84,7 +84,11 @@ def prune_candidates(
                 protected.add(digest)
     cutoff = now - timedelta(hours=max_age_hours)
     actions: list[dict[str, object]] = []
-    for item in harbor.list_candidate_tags(config.harbor_project):
+    managed_repositories = {
+        service.image_repository.removeprefix(config.harbor_registry + "/").removeprefix(config.harbor_project + "/")
+        for service in config.services
+    }
+    for item in harbor.list_candidate_tags(config.harbor_project, repositories=managed_repositories):
         tag = str(item.get("tag") or "")
         digest = str(item.get("digest") or "")
         pushed = _parse_time(str(item.get("push_time") or ""))
