@@ -3,6 +3,11 @@ description: Retry checkout once after cleaning an incomplete worktree
 inputs:
   fetch-depth: { default: "1" }
   ref: { default: "" }
+  repository: { default: ${{ github.repository }} }
+  token: { default: ${{ github.token }} }
+  path: { default: "" }
+  fetch-tags: { default: "false" }
+  persist-credentials: { default: "true" }
 runs:
   using: composite
   steps:
@@ -12,6 +17,11 @@ runs:
       with:
         fetch-depth: ${{ inputs.fetch-depth }}
         ref: ${{ inputs.ref }}
+        repository: ${{ inputs.repository }}
+        token: ${{ inputs.token }}
+        path: ${{ inputs.path }}
+        fetch-tags: ${{ inputs.fetch-tags }}
+        persist-credentials: ${{ inputs.persist-credentials }}
     - if: steps.first.outcome == 'failure'
       shell: bash
       run: git reset --hard HEAD 2>/dev/null || true; git clean -ffdx 2>/dev/null || true
@@ -20,3 +30,8 @@ runs:
       with:
         fetch-depth: ${{ inputs.fetch-depth }}
         ref: ${{ inputs.ref }}
+        repository: ${{ inputs.repository }}
+        token: ${{ inputs.token }}
+        path: ${{ inputs.path }}
+        fetch-tags: ${{ inputs.fetch-tags }}
+        persist-credentials: ${{ inputs.persist-credentials }}

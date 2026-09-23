@@ -3,6 +3,7 @@ inputs:
   node-version: { required: true }
   cache: { default: "" }
   cache-dependency-path: { default: "" }
+  mirror: { default: "" }
 runs:
   using: composite
   steps:
@@ -13,6 +14,7 @@ runs:
         node-version: ${{ inputs.node-version }}
         cache: ${{ inputs.cache }}
         cache-dependency-path: ${{ inputs.cache-dependency-path }}
+        mirror: ${{ inputs.mirror }}
     - if: steps.first.outcome == 'failure'
       shell: bash
       run: sleep 5
@@ -22,3 +24,4 @@ runs:
         node-version: ${{ inputs.node-version }}
         cache: ${{ inputs.cache }}
         cache-dependency-path: ${{ inputs.cache-dependency-path }}
+        mirror: ${{ inputs.mirror }}
