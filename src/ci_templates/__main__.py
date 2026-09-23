@@ -21,6 +21,7 @@ from .harbor import HarborClient, ImageRef
 from .artifact_cache import cache_prune, restore as restore_artifact, restore_pattern
 from .maintenance import MaintenanceError, prune_candidates
 from .cache_maintenance import CacheMaintenanceError, prune_cache
+from .transport import NetworkOperation, RetryPolicy, run_with_retry
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,10 +165,18 @@ def main(argv: list[str] | None = None) -> int:
     cache_cleanup = subparsers.add_parser("cache-prune")
     cache_cleanup.add_argument("--root", default="/cache")
     cache_cleanup.add_argument("--dry-run", action="store_true")
+    network_run = subparsers.add_parser("network-run")
+    network_run.add_argument("--profile", required=True, choices=("read", "download"))
+    network_run.add_argument("--label", required=True)
+    network_run.add_argument("command_argv", nargs=argparse.REMAINDER)
 
     args = parser.parse_args(argv)
     try:
-        if args.command == "cache-prune":
+        if args.command == "network-run":
+            command_argv = args.command_argv[1:] if args.command_argv[:1] == ["--"] else args.command_argv
+            if not command_argv: raise ConfigError("network-run requires a command after --")
+            run_with_retry(command_argv, NetworkOperation(args.profile), RetryPolicy(attempts=int(os.environ.get("CI_DOWNLOAD_RETRY_ATTEMPTS", "5"))), args.label)
+        elif args.command == "cache-prune":
             removed = prune_cache(args.root, dry_run=args.dry_run)
             print(json.dumps({"removed": removed, "dry_run": args.dry_run}, sort_keys=True))
         elif args.command == "artifact-cache":

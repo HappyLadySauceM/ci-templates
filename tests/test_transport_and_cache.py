@@ -12,7 +12,7 @@ from zipfile import ZipFile
 from ci_templates.artifact_cache import ArtifactCacheError, restore
 from ci_templates.cache_maintenance import prune_cache
 from ci_templates.maintenance import MaintenanceError, prune_candidates
-from ci_templates.transport import RetryPolicy, backoff_seconds, request_with_retry
+from ci_templates.transport import NetworkOperation, RetryPolicy, backoff_seconds, request_with_retry, run_with_retry
 from test_ci_templates import config
 
 
@@ -53,6 +53,36 @@ class RetryTest(unittest.TestCase):
 
     def test_backoff_is_bounded(self):
         self.assertEqual(backoff_seconds(RetryPolicy(initial_delay=2, maximum_delay=3, jitter=0), 5), 3)
+
+    def test_idempotent_write_requires_proof(self):
+        request = Request("https://example.test/resource", data=b"{}", method="PUT")
+        with self.assertRaisesRegex(ValueError, "idempotency"):
+            request_with_retry(lambda *_args, **_kwargs: object(), request, timeout=10,
+                               operation=NetworkOperation.IDEMPOTENT_WRITE)
+
+    def test_registered_command_retries_without_shell(self):
+        failed = __import__("subprocess").CompletedProcess(["cargo", "fetch", "--locked"], 1)
+        passed = __import__("subprocess").CompletedProcess(["cargo", "fetch", "--locked"], 0)
+        with patch("ci_templates.transport.subprocess.run", side_effect=[failed, passed]) as runner:
+            sleeps = []
+            run_with_retry(["cargo", "fetch", "--locked"], NetworkOperation.DOWNLOAD,
+                           RetryPolicy(attempts=2, jitter=0), "cargo-fetch", sleep=sleeps.append)
+        self.assertEqual(runner.call_count, 2)
+        self.assertEqual(sleeps, [1])
+
+    def test_unregistered_command_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "not registered"):
+            run_with_retry(["git", "push"], NetworkOperation.DOWNLOAD, None, "unsafe")
+
+    def test_shared_actions_pin_network_actions(self):
+        root = Path(__file__).parents[1] / ".github" / "actions"
+        upload = (root / "upload-artifact-with-retry" / "action.yml").read_text()
+        self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", upload)
+        self.assertIn("overwrite: true", upload)
+        self.assertIn("attempt-count", upload)
+        for action in ("checkout-with-retry", "setup-node-with-retry", "setup-go-with-retry"):
+            data = (root / action / "action.yml").read_text()
+            self.assertNotRegex(data, r"uses: actions/[^@]+@(v|main)")
 
 
 class ArtifactCacheTest(unittest.TestCase):

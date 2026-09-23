@@ -1,0 +1,21 @@
+name: Setup Go with retry
+inputs:
+  go-version-file: { required: true }
+  cache: { default: "true" }
+runs:
+  using: composite
+  steps:
+    - id: first
+      continue-on-error: true
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+        cache: ${{ inputs.cache }}
+    - if: steps.first.outcome == 'failure'
+      shell: bash
+      run: sleep 5
+    - if: steps.first.outcome == 'failure'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+        cache: ${{ inputs.cache }}

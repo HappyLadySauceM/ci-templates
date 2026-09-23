@@ -1,0 +1,30 @@
+version: 1
+operations:
+  - owner: ci-platform
+    name: github-artifact-upload
+    type: idempotent_write
+    retry: two-complete-attempts
+    cache: /cache/ci-artifacts
+    idempotency: stable-name-within-run-and-overwrite
+    failure: block-dependent-jobs
+  - owner: ci-platform
+    name: git-fetch
+    type: download
+    retry: default-download
+    cache: git-object-database
+    idempotency: read-only
+    failure: fail-job
+  - owner: ci-platform
+    name: language-dependency-fetch
+    type: download
+    retry: default-download
+    cache: /cache/npm,/cache/go,/cache/knowledge-core-cargo-target
+    idempotency: lockfile-addressed
+    failure: fail-job
+  - owner: ci-platform
+    name: github-harbor-control-plane
+    type: read-or-idempotent-write
+    retry: operation-aware
+    cache: artifact-cache-or-harbor
+    idempotency: key-or-read-after-write
+    failure: fail-closed
