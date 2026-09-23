@@ -12,6 +12,7 @@ from zipfile import ZipFile
 
 from ci_templates.artifact_cache import ArtifactCacheError, restore
 from ci_templates.cache_maintenance import prune_cache
+from ci_templates.harbor import HarborHTTPError
 from ci_templates.maintenance import MaintenanceError, prune_candidates
 from ci_templates.transport import NetworkOperation, RetryPolicy, backoff_seconds, request_with_retry, run_with_retry
 from ci_templates.network_audit import audit_workflows
@@ -196,6 +197,29 @@ class MaintenanceTest(unittest.TestCase):
         image = client.manifest_digest.call_args_list[0].args[0]
         self.assertEqual(image.registry, pipeline.harbor_registry)
         self.assertEqual(image.repository, "org/gateway")
+
+    def test_pruning_falls_back_to_distribution_api_for_forbidden_metadata(self):
+        client = unittest.mock.Mock()
+        client.manifest_digest.return_value = None
+        client.list_candidate_tags.side_effect = HarborHTTPError(
+            "GET", "/api/v2.0/projects/org/repositories/gateway/artifacts", 403
+        )
+        client.list_registry_candidate_tags.return_value = []
+        pipeline = config()
+        managed = {
+            service.image_repository.removeprefix(pipeline.harbor_registry + "/")
+            .removeprefix(pipeline.harbor_project + "/")
+            for service in pipeline.services
+        }
+        with (
+            patch("ci_templates.maintenance._active_commit_shas", return_value=set()),
+            patch.dict(os.environ, {"GITHUB_REPOSITORY": "org/repo"}),
+        ):
+            prune_candidates(pipeline, harbor_factory=lambda _: client, dry_run=True)
+
+        client.list_registry_candidate_tags.assert_called_once_with(
+            pipeline.harbor_project, managed
+        )
 
     @patch("ci_templates.cache_maintenance.os.statvfs")
     def test_cache_pressure_evicts_oldest_dependency_entries_to_low_watermark(self, statvfs):

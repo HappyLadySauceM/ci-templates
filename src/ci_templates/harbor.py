@@ -238,6 +238,26 @@ class HarborClient:
             page += 1
         return results
 
+    def list_registry_candidate_tags(
+        self,
+        project: str,
+        repositories: Collection[str],
+        *,
+        prefix: str = "sha-",
+    ) -> list[dict[str, Any]]:
+        """Use the OCI distribution API when a least-privilege robot cannot read Harbor metadata."""
+        results: list[dict[str, Any]] = []
+        for repository in sorted(set(repositories)):
+            _, _, payload = self._request("GET", f"/v2/{quote(project + '/' + repository, safe='/')}/tags/list")
+            tags = json.loads(payload or b"{}").get("tags") or []
+            for tag in tags:
+                if str(tag).startswith(prefix):
+                    image = ImageRef(self.registry, f"{project}/{repository}", str(tag))
+                    digest = self.manifest_digest(image)
+                    if digest:
+                        results.append({"repository": repository, "tag": str(tag), "digest": digest, "push_time": ""})
+        return results
+
     def tag_digest(self, image: ImageRef, digest: str) -> str:
         """Attach a tag only when absent or already pointing at ``digest``."""
 

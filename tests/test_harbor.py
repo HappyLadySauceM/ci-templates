@@ -108,6 +108,29 @@ class HarborManifestDigestTest(unittest.TestCase):
             with self.assertRaisesRegex(HarborError, "omitted digest"):
                 client.manifest_digest(_image())
 
+    def test_registry_candidate_listing_uses_distribution_api(self):
+        client = _client()
+        payload = json.dumps({"tags": ["dev", "sha-one", "sha-two"]}).encode()
+        with (
+            patch.object(client, "_request", return_value=(200, {}, payload)) as request,
+            patch.object(client, "manifest_digest", side_effect=[EXPECTED, OTHER]) as digest,
+        ):
+            candidates = client.list_registry_candidate_tags(
+                "knowledge-core", ["gateway"]
+            )
+
+        self.assertEqual(
+            candidates,
+            [
+                {"repository": "gateway", "tag": "sha-one", "digest": EXPECTED, "push_time": ""},
+                {"repository": "gateway", "tag": "sha-two", "digest": OTHER, "push_time": ""},
+            ],
+        )
+        request.assert_called_once_with(
+            "GET", "/v2/knowledge-core/gateway/tags/list"
+        )
+        self.assertEqual(digest.call_count, 2)
+
 
 class HarborTagRestoreTest(unittest.TestCase):
     def test_existing_matching_tag_is_idempotent_without_post(self):

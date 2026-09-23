@@ -9,7 +9,7 @@ from typing import Callable
 
 from .config import Pipeline
 from .github import GitHubError, _request
-from .harbor import HarborClient, ImageRef
+from .harbor import HarborClient, HarborHTTPError, ImageRef
 
 
 class MaintenanceError(RuntimeError):
@@ -41,6 +41,12 @@ def _active_commit_shas(repository: str) -> set[str]:
             if sha:
                 commits.add(sha)
     return commits
+
+def _commit_time(repository: str, sha: str) -> datetime | None:
+    payload = _request("GET", f"/repos/{repository}/commits/{sha}") or {}
+    commit = payload.get("commit") if isinstance(payload, dict) else None
+    committer = commit.get("committer") if isinstance(commit, dict) else None
+    return _parse_time(str(committer.get("date") or "")) if isinstance(committer, dict) else None
 
 
 def prune_candidates(
@@ -88,10 +94,18 @@ def prune_candidates(
         service.image_repository.removeprefix(config.harbor_registry + "/").removeprefix(config.harbor_project + "/")
         for service in config.services
     }
-    for item in harbor.list_candidate_tags(config.harbor_project, repositories=managed_repositories):
+    try:
+        candidates = harbor.list_candidate_tags(config.harbor_project, repositories=managed_repositories)
+    except HarborHTTPError as exc:
+        if exc.status_code != 403:
+            raise
+        candidates = harbor.list_registry_candidate_tags(config.harbor_project, managed_repositories)
+    for item in candidates:
         tag = str(item.get("tag") or "")
         digest = str(item.get("digest") or "")
-        pushed = _parse_time(str(item.get("push_time") or ""))
+        pushed = _parse_time(str(item.get("push_time") or "")) or _commit_time(
+            repository, tag.removeprefix("sha-")
+        )
         if not pushed or pushed > cutoff:
             continue
         sha = tag.removeprefix("sha-")
