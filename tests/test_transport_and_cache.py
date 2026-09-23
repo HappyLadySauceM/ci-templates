@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request
@@ -183,6 +184,18 @@ class MaintenanceTest(unittest.TestCase):
         with patch("ci_templates.maintenance._active_commit_shas", side_effect=MaintenanceError("unavailable")):
             with self.assertRaises(MaintenanceError):
                 prune_candidates(config(), harbor_factory=lambda _: self.fail("harbor must not be touched"))
+
+    def test_pruning_normalizes_full_service_image_repositories(self):
+        client = unittest.mock.Mock()
+        client.manifest_digest.return_value = None
+        client.list_candidate_tags.return_value = []
+        pipeline = config()
+        pipeline = replace(pipeline, services=(replace(pipeline.services[0], image_repository=f"{pipeline.harbor_registry}/org/gateway"),))
+        with patch("ci_templates.maintenance._active_commit_shas", return_value=set()), patch.dict(os.environ, {"GITHUB_REPOSITORY": "org/repo"}):
+            prune_candidates(pipeline, harbor_factory=lambda _: client, dry_run=True)
+        image = client.manifest_digest.call_args_list[0].args[0]
+        self.assertEqual(image.registry, pipeline.harbor_registry)
+        self.assertEqual(image.repository, "org/gateway")
 
     @patch("ci_templates.cache_maintenance.os.statvfs")
     def test_cache_pressure_evicts_oldest_dependency_entries_to_low_watermark(self, statvfs):

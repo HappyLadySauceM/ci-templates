@@ -75,7 +75,11 @@ def prune_candidates(
     harbor = harbor_factory(config.harbor_registry)
     for service in config.services:
         for stable_tag in (config.active_image_tag, config.previous_image_tag):
-            digest = harbor.manifest_digest(ImageRef(config.harbor_registry, service.image_repository, stable_tag))
+            if service.image_repository.startswith(config.harbor_registry + "/"):
+                image = ImageRef.parse(f"{service.image_repository}:{stable_tag}")
+            else:
+                image = ImageRef(config.harbor_registry, service.image_repository, stable_tag)
+            digest = harbor.manifest_digest(image)
             if digest:
                 protected.add(digest)
     cutoff = now - timedelta(hours=max_age_hours)
